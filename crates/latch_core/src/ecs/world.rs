@@ -198,6 +198,41 @@ impl World {
         }
     }
 
+    /// Iterate over archetypes that have ALL of the specified components.
+    /// 
+    /// This is the low-level primitive for zero-cost multi-component iteration.
+    /// Returns archetype IDs - use `archetype_storage()` to get the actual data.
+    pub fn archetypes_with_all(&self, component_ids: &[ComponentId]) -> Vec<ArchetypeId> {
+        if component_ids.is_empty() {
+            return Vec::new();
+        }
+        
+        // Start with archetypes that have the first component
+        let mut result: Vec<ArchetypeId> = self.archetypes_with(component_ids[0]).to_vec();
+        
+        // Filter to only archetypes that have ALL components
+        for &cid in &component_ids[1..] {
+            let archs = self.archetypes_with(cid);
+            result.retain(|a| archs.contains(a));
+        }
+        
+        result
+    }
+
+    /// Get direct access to an archetype's storage.
+    /// 
+    /// This allows zero-cost access to component slices.
+    pub fn archetype_storage(&self, archetype: ArchetypeId) -> Option<&ArchetypeStorage> {
+        self.storages.get(&archetype)
+    }
+
+    /// Get mutable access to an archetype's storage.
+    /// 
+    /// This allows zero-cost access to mutable component slices.
+    pub fn archetype_storage_mut(&mut self, archetype: ArchetypeId) -> Option<&mut ArchetypeStorage> {
+        self.storages.get_mut(&archetype)
+    }
+
     /// Get the total number of entities (including despawned slots).
     pub fn entity_count(&self) -> usize {
         self.storages.values().map(|s| s.len()).sum()
@@ -212,6 +247,35 @@ impl World {
     pub fn archetypes(&self) -> impl Iterator<Item = &ArchetypeStorage> {
         self.storages.values()
     }
+
+    /// Execute a function on all entities with the specified components.
+    /// 
+    /// This is the high-level ergonomic API. Use `columns_mut!` macro to extract
+    /// component slices, then iterate with rayon for parallelism.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
+    ///     let (positions, velocities) = columns_mut!(storage, Position, Velocity);
+    ///     positions.par_iter_mut().zip(velocities.par_iter_mut())
+    ///         .for_each(|(pos, vel)| {
+    ///             pos.x += vel.x * dt;
+    ///             pos.y += vel.y * dt;
+    ///         });
+    /// });
+    /// ```
+    pub fn par_for_each<F>(&mut self, component_ids: &[ComponentId], mut f: F)
+    where
+        F: FnMut(&mut ArchetypeStorage),
+    {
+        let archetypes = self.archetypes_with_all(component_ids);
+        
+        for &arch_id in &archetypes {
+            if let Some(storage) = self.storages.get_mut(&arch_id) {
+                f(storage);
+            }
+        }
+    }
 }
 
 impl Default for World {
@@ -219,3 +283,4 @@ impl Default for World {
         Self::new()
     }
 }
+

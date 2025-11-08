@@ -11,7 +11,7 @@
 // - Same inputs → same positions after 1000 frames
 // - Visual confirmation of replay matching original
 
-use latch_core::ecs::World;
+use latch_core::ecs::{World, Component};
 use latch_core::define_component;
 use latch_core::time::{SimulationTime, InputRecorder, TickInput, TICK_DURATION_SECS};
 use latch_core::spawn;
@@ -25,7 +25,23 @@ use winit::{
 };
 
 use wgpu;
+use wgpu::util::DeviceExt;
 use std::sync::Arc;
+
+// ============================================================================
+// Render Timings
+// ============================================================================
+
+#[derive(Default, Clone, Copy)]
+struct RenderTimings {
+    acquire_texture_us: u64,
+    build_instances_us: u64,
+    upload_instances_us: u64,
+    update_uniforms_us: u64,
+    encode_commands_us: u64,
+    submit_us: u64,
+    present_us: u64,
+}
 
 // ============================================================================
 // Components
@@ -58,48 +74,44 @@ define_component!(Color, 3, "Color");
 // ============================================================================
 
 fn physics_system(world: &mut World, dt: f32) {
-    // Apply velocity to position (collect first to avoid borrow checker issues)
-    let updates: Vec<_> = world
-        .query2::<Position, Velocity>()
-        .map(|(e, p, v)| {
-            let mut new_x = p.x + v.x * dt;
-            let mut new_y = p.y + v.y * dt;
-            
-            // Calculate bounce
-            let mut bounce_x = false;
-            let mut bounce_y = false;
-            
-            if new_x < -1.0 || new_x > 1.0 {
-                bounce_x = true;
-                new_x = new_x.clamp(-1.0, 1.0);
-            }
-            if new_y < -1.0 || new_y > 1.0 {
-                bounce_y = true;
-                new_y = new_y.clamp(-1.0, 1.0);
-            }
-            
-            (e, new_x, new_y, bounce_x, bounce_y)
-        })
-        .collect();
+    use rayon::prelude::*;
+    use latch_core::columns_mut;
     
-    // Apply updates
-    for (entity, new_x, new_y, bounce_x, bounce_y) in updates {
-        if let Some(pos) = world.get_component_mut::<Position>(entity) {
-            pos.x = new_x;
-            pos.y = new_y;
-        }
+    // Beautiful ergonomic API with TRUE arbitrary component support!
+    //
+    // The macro uses Rust's repetition patterns ($(...)*) to handle any number:
+    //
+    // 1 component:  let pos = columns_mut!(storage, Position);
+    // 2 components: let (p, v) = columns_mut!(storage, Position, Velocity);
+    // 3 components: let (p, v, c) = columns_mut!(storage, Position, Velocity, Color);
+    // 5 components: let (a, b, c, d, e) = columns_mut!(storage, A, B, C, D, E);
+    // 10 components: let (a, b, c, d, e, f, g, h, i, j) = columns_mut!(storage, ...);
+    //
+    // No hard-coded limit! The macro expands to handle however many you provide.
+    
+    world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
+        // Get both component slices - zero allocation, zero HashMap lookups!
+        let (positions, velocities) = columns_mut!(storage, Position, Velocity);
         
-        if bounce_x || bounce_y {
-            if let Some(vel) = world.get_component_mut::<Velocity>(entity) {
-                if bounce_x {
+        // Parallel iteration over component arrays
+        positions.par_iter_mut()
+            .zip(velocities.par_iter_mut())
+            .for_each(|(pos, vel)| {
+                // Update position
+                pos.x += vel.x * dt;
+                pos.y += vel.y * dt;
+                
+                // Bounce off edges
+                if pos.x < -1.0 || pos.x > 1.0 {
+                    pos.x = pos.x.clamp(-1.0, 1.0);
                     vel.x = -vel.x;
                 }
-                if bounce_y {
+                if pos.y < -1.0 || pos.y > 1.0 {
+                    pos.y = pos.y.clamp(-1.0, 1.0);
                     vel.y = -vel.y;
                 }
-            }
-        }
-    }
+            });
+    });
 }
 
 // ============================================================================
@@ -110,18 +122,39 @@ fn physics_system(world: &mut World, dt: f32) {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceData {
+    position: [f32; 2],
+    velocity: [f32; 2],
     color: [f32; 3],
+    _padding: [f32; 2], // Align to 16 bytes
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    interpolation_alpha: f32,
+    dt: f32,
+    _padding: [f32; 2], // Align to 16 bytes
 }
 
 struct TriangleRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    #[allow(dead_code)] // Stored for potential future use
+    #[allow(dead_code)]
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    pub vertex_buffer_capacity: usize, // Track current buffer capacity (exposed for metrics)
+    instance_buffer: wgpu::Buffer,
+    instance_buffer_capacity: usize,
+    last_instance_count: usize, // Track actual instances uploaded
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    last_physics_tick: u64,
 }
 
 impl TriangleRenderer {
@@ -165,7 +198,7 @@ impl TriangleRenderer {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::Immediate, // No V-Sync (Mailbox not supported on macOS)
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -177,9 +210,46 @@ impl TriangleRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/triangle.wgsl").into()),
         });
         
+        // Create uniform buffer for interpolation data
+        let uniforms = Uniforms {
+            interpolation_alpha: 0.0,
+            dt: TICK_DURATION_SECS,
+            _padding: [0.0, 0.0],
+        };
+        
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        
+        // Create bind group layout for uniforms
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Uniform Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniform Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+        
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
         
@@ -189,11 +259,24 @@ impl TriangleRenderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3],
-                }],
+                buffers: &[
+                    // Vertex buffer (base triangle shape)
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                    },
+                    // Instance buffer (position + velocity + color)
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<InstanceData>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            1 => Float32x2,  // position
+                            2 => Float32x2,  // velocity
+                            3 => Float32x3   // color
+                        ],
+                    },
+                ],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -225,11 +308,25 @@ impl TriangleRenderer {
             cache: None,
         });
         
-        // Create initial vertex buffer (will grow dynamically if needed)
-        let initial_capacity = 1024; // Start with capacity for 1024 triangles
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        // Create static vertex buffer with base triangle shape (centered at origin)
+        let size = 0.02;
+        let triangle_vertices = [
+            Vertex { position: [0.0, size] },       // Top
+            Vertex { position: [-size, -size] },    // Bottom left
+            Vertex { position: [size, -size] },     // Bottom right
+        ];
+        
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * 3 * initial_capacity) as u64,
+            contents: bytemuck::cast_slice(&triangle_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        
+        // Create dynamic instance buffer (will grow as needed)
+        let initial_capacity = 1024;
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Buffer"),
+            size: (std::mem::size_of::<InstanceData>() * initial_capacity) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -241,61 +338,117 @@ impl TriangleRenderer {
             config,
             pipeline,
             vertex_buffer,
-            vertex_buffer_capacity: initial_capacity,
+            instance_buffer,
+            instance_buffer_capacity: initial_capacity,
+            last_instance_count: 0,
+            uniform_buffer,
+            uniform_bind_group,
+            last_physics_tick: 0,
         }
     }
     
-    fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
-        // Build vertex buffer from all entities with Position + Color
-        let mut vertices = Vec::new();
+    fn render(&mut self, world: &World, tick: u64, interpolation_alpha: f32) -> Result<(bool, usize, RenderTimings), wgpu::SurfaceError> {
+        let mut timings = RenderTimings::default();
         
-        for (_entity, pos, color) in world.query2::<Position, Color>() {
-            let size = 0.02; // Triangle size
-            vertices.extend_from_slice(&[
-                Vertex {
-                    position: [pos.x, pos.y + size],
-                    color: [color.r, color.g, color.b],
-                },
-                Vertex {
-                    position: [pos.x - size, pos.y - size],
-                    color: [color.r, color.g, color.b],
-                },
-                Vertex {
-                    position: [pos.x + size, pos.y - size],
-                    color: [color.r, color.g, color.b],
-                },
-            ]);
-        }
+        let instance_count;
+        let mut uploaded = false;
         
-        // Resize buffer if needed (vertices = triangles * 3)
-        let triangle_count = vertices.len() / 3;
-        if triangle_count > self.vertex_buffer_capacity {
-            // Grow buffer by doubling (amortized O(1) like Vec)
-            let new_capacity = triangle_count.next_power_of_two();
-            println!("Resizing vertex buffer: {} → {} triangles", 
-                self.vertex_buffer_capacity, new_capacity);
+        // Only rebuild and upload instance data when physics ticks (not every render frame!)
+        if tick != self.last_physics_tick {
+            self.last_physics_tick = tick;
+            uploaded = true;
             
-            self.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Vertex Buffer"),
-                size: (std::mem::size_of::<Vertex>() * 3 * new_capacity) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.vertex_buffer_capacity = new_capacity;
+            let build_start = std::time::Instant::now();
+            
+            // Build instance data from all entities with Position + Velocity + Color
+            let mut instances = Vec::new();
+            
+            // Get archetypes that have all three components
+            let position_archs = world.archetypes_with(Position::ID);
+            let velocity_archs = world.archetypes_with(Velocity::ID);
+            let color_archs = world.archetypes_with(Color::ID);
+            
+            for &arch_id in position_archs {
+                if !velocity_archs.contains(&arch_id) || !color_archs.contains(&arch_id) {
+                    continue;
+                }
+                
+                if let (Some(positions), Some(velocities), Some(colors)) = (
+                    world.column::<Position>(arch_id),
+                    world.column::<Velocity>(arch_id),
+                    world.column::<Color>(arch_id),
+                ) {
+                    instances.reserve(positions.len());
+                    
+                    for i in 0..positions.len() {
+                        instances.push(InstanceData {
+                            position: [positions[i].x, positions[i].y],
+                            velocity: [velocities[i].x, velocities[i].y],
+                            color: [colors[i].r, colors[i].g, colors[i].b],
+                            _padding: [0.0, 0.0],
+                        });
+                    }
+                }
+            }
+            
+            instance_count = instances.len();
+            self.last_instance_count = instance_count; // Store for non-physics frames
+            
+            timings.build_instances_us = build_start.elapsed().as_micros() as u64;
+            
+            // Resize instance buffer if needed
+            if instance_count > self.instance_buffer_capacity {
+                let new_capacity = instance_count.next_power_of_two();
+                let bytes_per_instance = std::mem::size_of::<InstanceData>();
+                println!("Resizing instance buffer: {} → {} instances ({} bytes/instance, {} KB total)", 
+                    self.instance_buffer_capacity, new_capacity, bytes_per_instance, 
+                    (new_capacity * bytes_per_instance) / 1024);
+                
+                self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Instance Buffer"),
+                    size: (std::mem::size_of::<InstanceData>() * new_capacity) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.instance_buffer_capacity = new_capacity;
+            }
+            
+            // Upload instance data to GPU (only on physics tick!)
+            let upload_start = std::time::Instant::now();
+            if !instances.is_empty() {
+                self.queue.write_buffer(
+                    &self.instance_buffer,
+                    0,
+                    bytemuck::cast_slice(&instances),
+                );
+            }
+            timings.upload_instances_us = upload_start.elapsed().as_micros() as u64;
+        } else {
+            // Not a physics tick - use the last uploaded instance count
+            instance_count = self.last_instance_count;
         }
         
-        // Upload vertices to GPU
-        if !vertices.is_empty() {
-            self.queue.write_buffer(
-                &self.vertex_buffer,
-                0,
-                bytemuck::cast_slice(&vertices),
-            );
-        }
+        // Update uniforms every frame with interpolation alpha
+        let uniform_start = std::time::Instant::now();
+        let uniforms = Uniforms {
+            interpolation_alpha,
+            dt: TICK_DURATION_SECS,
+            _padding: [0.0, 0.0],
+        };
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+        timings.update_uniforms_us = uniform_start.elapsed().as_micros() as u64;
         
+        let acquire_start = std::time::Instant::now();
         let output = self.surface.get_current_texture()?;
+        timings.acquire_texture_us = acquire_start.elapsed().as_micros() as u64;
+        
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         
+        let encode_start = std::time::Instant::now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -322,14 +475,23 @@ impl TriangleRenderer {
             });
             
             render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..(vertices.len() as u32), 0..1);
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.draw(0..3, 0..(instance_count as u32)); // 3 vertices, N instances
         }
         
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        timings.encode_commands_us = encode_start.elapsed().as_micros() as u64;
         
-        Ok(())
+        let submit_start = std::time::Instant::now();
+        self.queue.submit(std::iter::once(encoder.finish()));
+        timings.submit_us = submit_start.elapsed().as_micros() as u64;
+        
+        let present_start = std::time::Instant::now();
+        output.present();
+        timings.present_us = present_start.elapsed().as_micros() as u64;
+        
+        Ok((uploaded, instance_count, timings))
     }
 }
 
@@ -349,6 +511,10 @@ struct App {
     frame_timer: FrameTimer,
     profiler: SystemProfiler,
     last_print: std::time::Instant,
+    frame_count: u64,
+    total_bytes_uploaded: u64,
+    render_timings: RenderTimings,
+    render_frame_count: u64,
 }
 
 enum Mode {
@@ -362,7 +528,7 @@ impl App {
         
         // Spawn 100 triangles with random positions and velocities
         use std::f32::consts::PI;
-        let num_triangles = 100000;
+        let num_triangles = 500000;
         let f_num_triangles = num_triangles as f32;
         for i in 0..num_triangles {
             let angle = (i as f32 / f_num_triangles) * 2.0 * PI;
@@ -402,6 +568,10 @@ impl App {
             frame_timer: FrameTimer::new(60),
             profiler: SystemProfiler::new(),
             last_print: std::time::Instant::now(),
+            frame_count: 0,
+            total_bytes_uploaded: 0,
+            render_timings: RenderTimings::default(),
+            render_frame_count: 0,
         }
     }
     
@@ -472,8 +642,25 @@ impl ApplicationHandler for App {
                 // Render
                 if let Some(renderer) = &mut self.renderer {
                     self.profiler.time_system("render", || {
-                        match renderer.render(&self.world) {
-                            Ok(_) => {}
+                        match renderer.render(&self.world, self.time.tick_count(), self.time.interpolation_alpha()) {
+                            Ok((uploaded, instance_count, timings)) => {
+                                // Track bandwidth (only when actually uploaded)
+                                if uploaded {
+                                    let bytes_per_upload = instance_count * std::mem::size_of::<InstanceData>();
+                                    self.total_bytes_uploaded += bytes_per_upload as u64;
+                                    self.frame_count += 1;
+                                }
+                                
+                                // Accumulate timings
+                                self.render_timings.acquire_texture_us += timings.acquire_texture_us;
+                                self.render_timings.build_instances_us += timings.build_instances_us;
+                                self.render_timings.upload_instances_us += timings.upload_instances_us;
+                                self.render_timings.update_uniforms_us += timings.update_uniforms_us;
+                                self.render_timings.encode_commands_us += timings.encode_commands_us;
+                                self.render_timings.submit_us += timings.submit_us;
+                                self.render_timings.present_us += timings.present_us;
+                                self.render_frame_count += 1;
+                            }
                             Err(wgpu::SurfaceError::Lost) => {
                                 // Reconfigure surface
                             }
@@ -508,6 +695,32 @@ impl ApplicationHandler for App {
                     let physics_ms = self.profiler.get_timing("physics").as_secs_f64() * 1000.0;
                     let render_ms = self.profiler.get_timing("render").as_secs_f64() * 1000.0;
                     println!("Systems: physics={:.2}ms, render={:.2}ms", physics_ms, render_ms);
+                    
+                    // Bandwidth metrics
+                    if self.frame_count > 0 {
+                        let mb_uploaded = self.total_bytes_uploaded as f64 / (1024.0 * 1024.0);
+                        let mb_per_sec = mb_uploaded / 2.0; // 2 second window
+                        println!("GPU upload: {:.2} MB/s ({} bytes/instance, {} uploads)", 
+                            mb_per_sec, std::mem::size_of::<InstanceData>(), self.frame_count);
+                        self.total_bytes_uploaded = 0;
+                        self.frame_count = 0;
+                    }
+                    
+                    // Render timings breakdown
+                    if self.render_frame_count > 0 {
+                        let frames = self.render_frame_count as f64;
+                        println!("\nRender Breakdown (avg µs per frame):");
+                        println!("  acquire_texture: {:.1}", self.render_timings.acquire_texture_us as f64 / frames);
+                        println!("  build_instances: {:.1}", self.render_timings.build_instances_us as f64 / frames);
+                        println!("  upload_instances: {:.1}", self.render_timings.upload_instances_us as f64 / frames);
+                        println!("  update_uniforms: {:.1}", self.render_timings.update_uniforms_us as f64 / frames);
+                        println!("  encode_commands: {:.1}", self.render_timings.encode_commands_us as f64 / frames);
+                        println!("  submit: {:.1}", self.render_timings.submit_us as f64 / frames);
+                        println!("  present: {:.1}", self.render_timings.present_us as f64 / frames);
+                        
+                        self.render_timings = RenderTimings::default();
+                        self.render_frame_count = 0;
+                    }
                     
                     // Reset profiler for next period
                     self.profiler.reset();

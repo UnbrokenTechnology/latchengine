@@ -6,13 +6,64 @@
 use crate::ecs::{Archetype, Component, ComponentId, ComponentMeta, Entity, meta_of};
 use std::collections::HashMap;
 
+/// Macro to get multiple mutable component slices from a storage.
+/// 
+/// Handles any number of components using compile-time validation.
+/// 
+/// # Example
+/// ```ignore
+/// let positions = columns_mut!(storage, Position);
+/// let (positions, velocities) = columns_mut!(storage, Position, Velocity);
+/// let (a, b, c) = columns_mut!(storage, ComponentA, ComponentB, ComponentC);
+/// let (a, b, c, d, e) = columns_mut!(storage, A, B, C, D, E);
+/// ```
+#[macro_export]
+macro_rules! columns_mut {
+    // Single component - just call the method directly
+    ($storage:expr, $T:ty) => {
+        $storage.column_as_slice_mut::<$T>().unwrap()
+    };
+    
+    // Multiple components - use the general implementation
+    ($storage:expr, $($T:ty),+ $(,)?) => {{
+        // Collect component IDs and verify uniqueness at compile time
+        let ids = [$(<$T as $crate::ecs::Component>::ID),+];
+        
+        // Get raw pointers to each column
+        let ptrs = [$(unsafe {
+            $storage.get_column_ptr(<$T as $crate::ecs::Component>::ID)
+                .expect("Component not found in archetype")
+        }),+];
+        
+        // Runtime verification that all IDs are unique
+        for i in 0..ids.len() {
+            for j in (i+1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "Cannot get multiple mutable references to the same component");
+            }
+        }
+        
+        // SAFETY: We've verified all component IDs are unique, so these point to different columns.
+        // Each column is independently mutable.
+        unsafe {
+            let mut idx = 0;
+            ($(
+                {
+                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice::<$T>(ptrs[idx]);
+                    idx += 1;
+                    slice
+                }
+            ),+)
+        }
+    }};
+}
+
 /// Storage for all entities of a single archetype.
 /// 
 /// Uses Structure-of-Arrays (SoA) layout for cache efficiency and
 /// easy parallel iteration.
 pub struct ArchetypeStorage {
     pub archetype: Archetype,
-    columns: HashMap<ComponentId, Column>,
+    pub(crate) columns: HashMap<ComponentId, Column>,
     len: usize,
     free: Vec<usize>,
     entity_ids: Vec<Option<u64>>,
@@ -191,12 +242,71 @@ impl ArchetypeStorage {
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts_mut(ptr as *mut T, len) })
     }
+
+    /// Get two mutable component slices simultaneously.
+    /// 
+    /// This is safe because T1 and T2 are stored in separate columns.
+    /// Panics if T1::ID == T2::ID (same component type).
+    pub fn two_columns_mut<T1: Component, T2: Component>(&mut self) -> Option<(&mut [T1], &mut [T2])> {
+        assert_ne!(T1::ID, T2::ID, "Cannot get two mutable references to the same component");
+        
+        let meta1 = meta_of(T1::ID)?;
+        let meta2 = meta_of(T2::ID)?;
+        
+        let col1_ptr = self.columns.get_mut(&T1::ID)? as *mut Column;
+        let col2_ptr = self.columns.get_mut(&T2::ID)? as *mut Column;
+        
+        // Safety: We've verified T1::ID != T2::ID, so these are different columns
+        unsafe {
+            let col1 = &mut *col1_ptr;
+            let col2 = &mut *col2_ptr;
+            
+            assert_eq!(meta1.size, col1.elem_size);
+            assert_eq!(meta2.size, col2.elem_size);
+            
+            debug_assert_eq!(col1.bytes.as_ptr() as usize % std::mem::align_of::<T1>(), 0);
+            debug_assert_eq!(col2.bytes.as_ptr() as usize % std::mem::align_of::<T2>(), 0);
+            
+            let ptr1 = col1.bytes.as_mut_ptr() as *mut T1;
+            let len1 = col1.bytes.len() / meta1.size;
+            
+            let ptr2 = col2.bytes.as_mut_ptr() as *mut T2;
+            let len2 = col2.bytes.len() / meta2.size;
+            
+            Some((
+                std::slice::from_raw_parts_mut(ptr1, len1),
+                std::slice::from_raw_parts_mut(ptr2, len2),
+            ))
+        }
+    }
+
+    /// Get a raw pointer to a column for use in the columns_mut! macro.
+    /// 
+    /// # Safety
+    /// This returns a raw pointer that the caller must use safely.
+    /// The macro ensures uniqueness of component IDs before dereferencing.
+    #[doc(hidden)]
+    pub unsafe fn get_column_ptr(&mut self, cid: ComponentId) -> Option<*mut u8> {
+        self.columns.get_mut(&cid).map(|col| col as *mut Column as *mut u8)
+    }
+
+    /// Convert a raw column pointer to a typed slice.
+    /// 
+    /// # Safety
+    /// - ptr must be a valid pointer returned from get_column_ptr
+    /// - T must match the actual component type stored in that column
+    /// - No other references to this column may exist
+    #[doc(hidden)]
+    pub unsafe fn column_ptr_to_slice<T: Component>(ptr: *mut u8) -> &'static mut [T] {
+        let col = &mut *(ptr as *mut Column);
+        col.as_slice_mut::<T>()
+    }
 }
 
 /// A single component column (raw byte storage).
 /// 
 /// Uses aligned allocation to ensure safe transmutation to typed slices.
-struct Column {
+pub(crate) struct Column {
     elem_size: usize,
     elem_align: usize,
     bytes: Vec<u8>,
@@ -210,6 +320,20 @@ impl Column {
             elem_align: meta.align,
             bytes: Vec::new(),
         }
+    }
+
+    /// Get a typed mutable slice from this column.
+    /// 
+    /// # Safety
+    /// Caller must ensure T matches the actual component type stored.
+    pub(crate) unsafe fn as_slice_mut<T: Component>(&mut self) -> &mut [T] {
+        let meta = meta_of(T::ID).expect("Component not registered");
+        assert_eq!(meta.size, self.elem_size);
+        debug_assert_eq!(self.bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
+        
+        let ptr = self.bytes.as_mut_ptr() as *mut T;
+        let len = self.bytes.len() / meta.size;
+        std::slice::from_raw_parts_mut(ptr, len)
     }
 
     /// Grow the column by one element.
