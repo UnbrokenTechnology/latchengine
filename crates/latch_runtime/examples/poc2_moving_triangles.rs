@@ -643,7 +643,7 @@ impl App {
         
         // Spawn triangles with random positions and velocities
         use std::f32::consts::PI;
-        let num_triangles = 15_000_000; // 5 MILLION TRIANGLES!
+        let num_triangles = 5_000_000; // 5 MILLION TRIANGLES!
         let f_num_triangles = num_triangles as f32;
         for i in 0..num_triangles {
             let angle = (i as f32 / f_num_triangles) * 2.0 * PI;
