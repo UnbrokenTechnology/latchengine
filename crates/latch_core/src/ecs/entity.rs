@@ -1,50 +1,59 @@
-//! Entity handles with generational indexing
+// entity.rs - Entity handles with generational indices
+//
+// Generational indices prevent stale entity handles from accessing wrong entities
+// after despawn+respawn cycles reuse the same slot.
 
-use super::archetype::ArchetypeId;
+use crate::ecs::ArchetypeId;
 
-/// Entity handle (generation-indexed for safety)
-///
-/// Format: [32-bit index | 32-bit generation]
-/// - Index: Position in entity metadata array
-/// - Generation: Incremented on entity destruction (prevents use-after-free)
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+/// Entity handle with generational index for safety.
+/// 
+/// The generation is incremented each time an entity slot is reused,
+/// preventing stale handles from accessing the wrong entity.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Entity {
-    pub(crate) index: u32,
-    pub(crate) generation: u32,
+    /// Globally unique entity ID (never reused).
+    pub id: u64,
+    
+    /// Generation counter for this slot (increments on despawn).
+    pub generation: u32,
+    
+    /// Archetype this entity belongs to.
+    pub archetype: ArchetypeId,
+    
+    /// Row index within the archetype's storage.
+    pub index: usize,
 }
 
 impl Entity {
-    pub(crate) const fn new(index: u32, generation: u32) -> Self {
-        Self { index, generation }
-    }
-
-    pub fn index(&self) -> u32 {
-        self.index
-    }
-
-    pub fn generation(&self) -> u32 {
-        self.generation
-    }
-
-    /// Serialize to 64-bit integer (for networking/save files)
-    pub fn to_bits(&self) -> u64 {
-        ((self.generation as u64) << 32) | (self.index as u64)
-    }
-
-    /// Deserialize from 64-bit integer
-    pub fn from_bits(bits: u64) -> Self {
+    /// Create a new entity handle.
+    pub(crate) fn new(id: u64, generation: u32, archetype: ArchetypeId, index: usize) -> Self {
         Self {
-            index: bits as u32,
-            generation: (bits >> 32) as u32,
+            id,
+            generation,
+            archetype,
+            index,
         }
     }
-}
 
-/// Entity metadata tracked by the World
-#[derive(Clone)]
-pub(crate) struct EntityMetadata {
-    pub generation: u32,
-    pub alive: bool,
-    pub archetype_id: ArchetypeId,
-    pub archetype_index: usize,
+    /// Pack the entity into a single u64 for FFI/scripting.
+    /// 
+    /// This is a lossy conversion - only the entity ID is preserved.
+    /// Use only for opaque handles in scripting contexts.
+    pub fn to_bits(self) -> u64 {
+        self.id
+    }
+
+    /// Unpack an entity from a u64.
+    /// 
+    /// This creates a partially invalid entity (generation, archetype, and index are zeroed).
+    /// Only the ID is restored. Use only for opaque handles in scripting contexts
+    /// where the World will validate and fill in the missing fields.
+    pub fn from_bits(bits: u64) -> Self {
+        Self {
+            id: bits,
+            generation: 0,
+            archetype: 0,
+            index: 0,
+        }
+    }
 }

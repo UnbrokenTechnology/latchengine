@@ -3,7 +3,6 @@ resolver = "2"
 default-members = ["crates/latch_runtime"]  # Default for `cargo run`
 members = [
     "crates/latch_core",
-    "crates/latch_core2",
     "crates/latch_render",
     "crates/latch_net",
     "crates/latch_script",

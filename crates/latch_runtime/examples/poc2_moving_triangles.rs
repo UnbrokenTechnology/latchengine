@@ -12,6 +12,7 @@
 // - Visual confirmation of replay matching original
 
 use latch_core::ecs::World;
+use latch_core::define_component;
 use latch_core::time::{SimulationTime, InputRecorder, TickInput, TICK_DURATION_SECS};
 use latch_core::spawn;
 use latch_metrics::{FrameTimer, SystemProfiler};
@@ -35,12 +36,14 @@ struct Position {
     x: f32,
     y: f32,
 }
+define_component!(Position, 1, "Position");
 
 #[derive(Clone, Copy, Debug)]
 struct Velocity {
     x: f32,
     y: f32,
 }
+define_component!(Velocity, 2, "Velocity");
 
 #[derive(Clone, Copy, Debug)]
 struct Color {
@@ -48,6 +51,7 @@ struct Color {
     g: f32,
     b: f32,
 }
+define_component!(Color, 3, "Color");
 
 // ============================================================================
 // Systems

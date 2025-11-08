@@ -1,107 +1,96 @@
-//! Component trait and storage
+// component.rs - Runtime component registration
+//
+// Components are identified by u32 IDs, not Rust TypeIds.
+// This enables TypeScript-defined components to coexist with Rust components.
 
-use std::any::Any;
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::mem::{align_of, size_of};
+use std::sync::RwLock;
 
-/// Component ID - unique identifier for a component type
-///
-/// This can be:
-/// - Rust types: Hash of type name
-/// - TypeScript: Hash of class name  
-/// - Manual: Any chosen u64
-pub type ComponentId = u64;
+pub type ComponentId = u32;
 
-/// Base trait for all components
-///
-/// Requirements:
-/// - Must be 'static (no lifetimes)
-/// - Must be Send + Sync (for parallel systems)
-///
-/// Components should be POD (Plain Old Data):
-/// - Public fields
-/// - No methods (logic goes in systems)
-/// - Deterministic memory layout
-pub trait Component: 'static + Send + Sync {
-    /// Get the unique ID for this component type
-    fn id() -> ComponentId where Self: Sized;
+/// Metadata describing a component's memory layout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentMeta {
+    pub id: ComponentId,
+    pub name: String,
+    pub size: usize,
+    pub align: usize,
 }
 
-/// Helper macro to implement Component with a derived ID
+/// Global registry for both Rust-defined and TypeScript-defined components.
+static REGISTRY: Lazy<RwLock<HashMap<ComponentId, ComponentMeta>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Register a component's metadata.
+/// 
+/// # Safety
+/// Callers must ensure that `size` and `align` accurately describe the component's layout
+/// when used with typed access methods.
+pub fn register_component(meta: ComponentMeta) {
+    let mut map = REGISTRY.write().unwrap();
+    if let Some(prev) = map.insert(meta.id, meta.clone()) {
+        // Sanity check: re-registration must match previous layout
+        assert_eq!(
+            prev.size, meta.size,
+            "Component size mismatch for id {}: was {}, now {}",
+            meta.id, prev.size, meta.size
+        );
+        assert_eq!(
+            prev.align, meta.align,
+            "Component align mismatch for id {}: was {}, now {}",
+            meta.id, prev.align, meta.align
+        );
+    }
+}
+
+/// Look up component metadata by ID.
+pub fn meta_of(id: ComponentId) -> Option<ComponentMeta> {
+    REGISTRY.read().unwrap().get(&id).cloned()
+}
+
+/// Trait for Rust-defined POD components.
+/// 
+/// # Safety
+/// Implementors must:
+/// - Be POD (Plain Old Data): no Drop, no internal references
+/// - Have stable layout (no padding variations)
+/// - Be Send + Sync for parallel iteration
+pub trait Component: 'static + Sized + Send + Sync {
+    /// Globally unique component ID.
+    const ID: ComponentId;
+    
+    /// Human-readable name for debugging.
+    const NAME: &'static str;
+
+    /// Register this component's layout with the global registry.
+    /// Should be called once during startup.
+    fn ensure_registered() {
+        register_component(ComponentMeta {
+            id: Self::ID,
+            name: Self::NAME.to_string(),
+            size: size_of::<Self>(),
+            align: align_of::<Self>(),
+        });
+    }
+}
+
+/// Helper macro to implement Component trait.
+/// 
+/// # Example
+/// ```ignore
+/// #[derive(Clone, Copy)]
+/// struct Position { x: f32, y: f32 }
+/// 
+/// define_component!(Position, 1, "Position");
+/// ```
 #[macro_export]
-macro_rules! component {
-    ($type:ty) => {
-        impl $crate::ecs::Component for $type {
-            fn id() -> $crate::ecs::ComponentId {
-                // Simple FNV-1a hash of type name
-                const fn hash_type_name() -> u64 {
-                    let bytes = ::core::any::type_name::<$type>().as_bytes();
-                    let mut hash: u64 = 0xcbf29ce484222325;
-                    let mut i = 0;
-                    while i < bytes.len() {
-                        hash ^= bytes[i] as u64;
-                        hash = hash.wrapping_mul(0x100000001b3);
-                        i += 1;
-                    }
-                    hash
-                }
-                hash_type_name()
-            }
+macro_rules! define_component {
+    ($ty:ty, $id:expr, $name:expr) => {
+        impl $crate::ecs::Component for $ty {
+            const ID: $crate::ecs::ComponentId = $id;
+            const NAME: &'static str = $name;
         }
     };
-}
-
-/// Internal trait for type-erased component storage
-#[allow(dead_code)]
-pub(crate) trait ComponentStorage: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn len(&self) -> usize;
-    fn swap_remove(&mut self, index: usize);
-    fn clone_box(&self) -> Box<dyn ComponentStorage>;
-}
-
-/// Type-specific component storage
-pub(crate) struct ComponentVec<T: Component> {
-    pub data: Vec<T>,
-}
-
-impl<T: Component> ComponentVec<T> {
-    pub fn new() -> Self {
-        Self { data: Vec::new() }
-    }
-
-    pub fn push(&mut self, value: T) {
-        self.data.push(value);
-    }
-
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.data.get(index)
-    }
-
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        self.data.get_mut(index)
-    }
-}
-
-impl<T: Component + Clone> ComponentStorage for ComponentVec<T> {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    fn swap_remove(&mut self, index: usize) {
-        self.data.swap_remove(index);
-    }
-
-    fn clone_box(&self) -> Box<dyn ComponentStorage> {
-        Box::new(Self {
-            data: self.data.clone(),
-        })
-    }
 }
