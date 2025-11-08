@@ -65,4 +65,20 @@ See [docs/phase0-plan.md](docs/phase0-plan.md) for details.
 
 ## License
 
-MIT OR Apache-2.0
+**Latch Engine License v1.0** - Source-available, non-redistributable
+
+- ✅ **Free to use** for game development (personal or commercial)
+- ✅ **Free to study** the source code
+- ✅ **Your games are yours** - distribute under any license, no royalties
+- ✅ **Runtime redistribution allowed** when bundled with your game
+- ❌ **Engine redistribution prohibited** - download from official sources only
+
+See [LICENSE.md](LICENSE.md) for full terms.
+
+### Why This License?
+
+This ensures:
+- All users get the latest version from official channels
+- Future monetization options remain open (e.g., premium features, hosted services)
+- No fragmentation from competing forks
+- Your games remain 100% yours with zero restrictions
