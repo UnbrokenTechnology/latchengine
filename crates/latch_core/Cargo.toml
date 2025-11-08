@@ -1,0 +1,20 @@
+[package]
+name = "latch_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# External dependencies
+glam = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+# Optional: remove hecs if we write our own ECS
+hecs = { workspace = true, optional = true }
+
+[features]
+default = []
+reference_ecs = ["hecs"]  # Use hecs for initial prototyping

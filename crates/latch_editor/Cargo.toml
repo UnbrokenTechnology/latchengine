@@ -1,0 +1,23 @@
+[package]
+name = "latch_editor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "latch-editor"
+path = "src/main.rs"
+
+[dependencies]
+latch_core = { workspace = true }
+latch_render = { workspace = true }
+latch_net = { workspace = true }
+latch_script = { workspace = true }
+latch_asset = { workspace = true }
+latch_audio = { workspace = true }
+latch_services = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

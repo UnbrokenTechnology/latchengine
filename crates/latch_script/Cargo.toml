@@ -1,0 +1,15 @@
+[package]
+name = "latch_script"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+latch_core = { workspace = true }
+
+rquickjs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

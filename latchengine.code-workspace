@@ -1,0 +1,34 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "rust-analyzer.linkedProjects": [
+      "./Cargo.toml"
+    ],
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.procMacro.enable": true,
+    "files.exclude": {
+      "**/target": true
+    },
+    "search.exclude": {
+      "**/target": true,
+      "Cargo.lock": true
+    },
+    "[rust]": {
+      "editor.formatOnSave": true,
+      "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "rust-lang.rust-analyzer",
+      "vadimcn.vscode-lldb",
+      "serayuzgur.crates",
+      "tamasfe.even-better-toml"
+    ]
+  }
+}

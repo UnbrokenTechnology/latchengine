@@ -1,0 +1,16 @@
+[package]
+name = "latch_render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+latch_core = { workspace = true }
+
+winit = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+glam = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
