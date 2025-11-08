@@ -13,16 +13,34 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        example: [poc1_triangle, poc2_moving_triangles]
         include:
+          # PoC 1 artifacts
           - os: ubuntu-latest
+            example: poc1_triangle
             artifact_name: poc1_triangle-linux
             artifact_path: target/release/examples/poc1_triangle
           - os: windows-latest
+            example: poc1_triangle
             artifact_name: poc1_triangle-windows.exe
             artifact_path: target/release/examples/poc1_triangle.exe
           - os: macos-latest
+            example: poc1_triangle
             artifact_name: poc1_triangle-macos
             artifact_path: target/release/examples/poc1_triangle
+          # PoC 2 artifacts
+          - os: ubuntu-latest
+            example: poc2_moving_triangles
+            artifact_name: poc2_moving_triangles-linux
+            artifact_path: target/release/examples/poc2_moving_triangles
+          - os: windows-latest
+            example: poc2_moving_triangles
+            artifact_name: poc2_moving_triangles-windows.exe
+            artifact_path: target/release/examples/poc2_moving_triangles.exe
+          - os: macos-latest
+            example: poc2_moving_triangles
+            artifact_name: poc2_moving_triangles-macos
+            artifact_path: target/release/examples/poc2_moving_triangles
 
     steps:
       - uses: actions/checkout@v4
@@ -38,10 +56,10 @@ jobs:
             libgl1-mesa-dev libwayland-dev libxkbcommon-dev
       
       - name: Build example
-        run: cargo build --release --example poc1_triangle
+        run: cargo build --release --example ${{ matrix.example }}
       
       - name: Test build (compile check only, no display)
-        run: cargo build --release --example poc1_triangle
+        run: cargo build --release --example ${{ matrix.example }}
         env:
           # Skip running GUI app in CI (no display available)
           SKIP_RUN: true
