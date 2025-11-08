@@ -47,25 +47,34 @@ struct RenderTimings {
 // Components
 // ============================================================================
 
+// Integer-based physics with fixed-point precision
+// - 1 game unit = 10 micrometers (0.00001 meters)
+// - Position: i32 → range ±21,474,836 units = ±214.7 meters
+// - Velocity: i16 → range ±32,767 units/tick = ±327mm/tick = 19.6 m/s max
+// - NDC mapping: 1.0 NDC = 1,000,000 units = 10 meters
+
+const UNITS_PER_METER: i32 = 100_000; // 10 micrometers precision
+const UNITS_PER_NDC: i32 = 10 * UNITS_PER_METER; // 1 NDC = 10 meters
+
 #[derive(Clone, Copy, Debug)]
 struct Position {
-    x: f32,
-    y: f32,
+    x: i32,  // Fixed-point: units (10 µm precision)
+    y: i32,
 }
 define_component!(Position, 1, "Position");
 
 #[derive(Clone, Copy, Debug)]
 struct Velocity {
-    x: f32,
-    y: f32,
+    x: i16,  // Fixed-point: units per tick (10 µm precision)
+    y: i16,
 }
 define_component!(Velocity, 2, "Velocity");
 
 #[derive(Clone, Copy, Debug)]
 struct Color {
-    r: f32,
-    g: f32,
-    b: f32,
+    r: u8,   // 0-255
+    g: u8,
+    b: u8,
 }
 define_component!(Color, 3, "Color");
 
@@ -73,21 +82,12 @@ define_component!(Color, 3, "Color");
 // Systems
 // ============================================================================
 
-fn physics_system(world: &mut World, dt: f32) {
+fn physics_system(world: &mut World, _dt: f32) {
     use rayon::prelude::*;
     use latch_core::columns_mut;
     
-    // Beautiful ergonomic API with TRUE arbitrary component support!
-    //
-    // The macro uses Rust's repetition patterns ($(...)*) to handle any number:
-    //
-    // 1 component:  let pos = columns_mut!(storage, Position);
-    // 2 components: let (p, v) = columns_mut!(storage, Position, Velocity);
-    // 3 components: let (p, v, c) = columns_mut!(storage, Position, Velocity, Color);
-    // 5 components: let (a, b, c, d, e) = columns_mut!(storage, A, B, C, D, E);
-    // 10 components: let (a, b, c, d, e, f, g, h, i, j) = columns_mut!(storage, ...);
-    //
-    // No hard-coded limit! The macro expands to handle however many you provide.
+    // Integer-based deterministic physics!
+    // No floating-point, no drift, perfect replay.
     
     world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
         // Get both component slices - zero allocation, zero HashMap lookups!
@@ -97,18 +97,19 @@ fn physics_system(world: &mut World, dt: f32) {
         positions.par_iter_mut()
             .zip(velocities.par_iter_mut())
             .for_each(|(pos, vel)| {
-                // Update position
-                pos.x += vel.x * dt;
-                pos.y += vel.y * dt;
+                // Update position (pure integer arithmetic!)
+                pos.x += vel.x as i32;
+                pos.y += vel.y as i32;
                 
-                // Bounce off edges
-                if pos.x < -1.0 || pos.x > 1.0 {
-                    pos.x = pos.x.clamp(-1.0, 1.0);
-                    vel.x = -vel.x;
+                // Bounce off edges (NDC bounds: ±1,000,000 units = ±10 meters)
+                let bound = UNITS_PER_NDC;
+                if pos.x < -bound || pos.x > bound {
+                    pos.x = pos.x.clamp(-bound, bound);
+                    vel.x = vel.x.saturating_neg(); // Handle i16::MIN overflow
                 }
-                if pos.y < -1.0 || pos.y > 1.0 {
-                    pos.y = pos.y.clamp(-1.0, 1.0);
-                    vel.y = -vel.y;
+                if pos.y < -bound || pos.y > bound {
+                    pos.y = pos.y.clamp(-bound, bound);
+                    vel.y = vel.y.saturating_neg(); // Handle i16::MIN overflow
                 }
             });
     });
@@ -124,14 +125,24 @@ struct Vertex {
     position: [f32; 2],
 }
 
+// Split instance data into STATIC (uploaded once) and DYNAMIC (uploaded every tick)
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct InstanceData {
-    position: [f32; 2],
-    velocity: [f32; 2],
-    color: [f32; 3],
-    _padding: [f32; 2], // Align to 16 bytes
+struct InstanceStatic {
+    color: [u8; 4],          // 4 bytes - RGB + padding (u8: 0-255)
 }
+// Total: 4 bytes per instance - uploaded ONCE at startup!
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceDynamic {
+    position: [i32; 2],      // 8 bytes - integer game units (10 µm precision)
+    velocity: [i16; 2],      // 4 bytes - MUST update when bouncing!
+}
+// Total: 12 bytes per instance - uploaded every physics tick (60 Hz)
+// 5M triangles = 60 MB per upload
+// GPU converts i32 → NDC in shader (zero CPU conversion cost!)
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -149,7 +160,8 @@ struct TriangleRenderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    instance_buffer: wgpu::Buffer,
+    instance_static_buffer: wgpu::Buffer,   // Velocity + Color (uploaded ONCE)
+    instance_dynamic_buffer: wgpu::Buffer,  // Position (uploaded every tick)
     instance_buffer_capacity: usize,
     last_instance_count: usize, // Track actual instances uploaded
     uniform_buffer: wgpu::Buffer,
@@ -266,14 +278,21 @@ impl TriangleRenderer {
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &wgpu::vertex_attr_array![0 => Float32x2],
                     },
-                    // Instance buffer (position + velocity + color)
+                    // Instance buffer 1: DYNAMIC data (position + velocity - updated every tick)
                     wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<InstanceData>() as wgpu::BufferAddress,
+                        array_stride: std::mem::size_of::<InstanceDynamic>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
-                            1 => Float32x2,  // position
-                            2 => Float32x2,  // velocity
-                            3 => Float32x3   // color
+                            1 => Sint32x2,   // position (i32x2 game units - converted in shader)
+                            2 => Snorm16x2,  // velocity (i16x2 - changes on bounce!)
+                        ],
+                    },
+                    // Instance buffer 2: STATIC data (color only - uploaded once)
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<InstanceStatic>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            3 => Unorm8x4    // color (u8x4 normalized to 0.0-1.0)
                         ],
                     },
                 ],
@@ -322,11 +341,21 @@ impl TriangleRenderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
         
-        // Create dynamic instance buffer (will grow as needed)
+        // Create instance buffers (will grow as needed)
         let initial_capacity = 1024;
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Instance Buffer"),
-            size: (std::mem::size_of::<InstanceData>() * initial_capacity) as u64,
+        
+        // Static buffer: Velocity + Color (uploaded ONCE)
+        let instance_static_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Static Buffer"),
+            size: (std::mem::size_of::<InstanceStatic>() * initial_capacity) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        // Dynamic buffer: Position (uploaded every tick)
+        let instance_dynamic_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Dynamic Buffer"),
+            size: (std::mem::size_of::<InstanceDynamic>() * initial_capacity) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -338,7 +367,8 @@ impl TriangleRenderer {
             config,
             pipeline,
             vertex_buffer,
-            instance_buffer,
+            instance_static_buffer,
+            instance_dynamic_buffer,
             instance_buffer_capacity: initial_capacity,
             last_instance_count: 0,
             uniform_buffer,
@@ -353,21 +383,30 @@ impl TriangleRenderer {
         let instance_count;
         let mut uploaded = false;
         
-        // Only rebuild and upload instance data when physics ticks (not every render frame!)
+        // Only rebuild and upload DYNAMIC data when physics ticks (not every render frame!)
         if tick != self.last_physics_tick {
             self.last_physics_tick = tick;
             uploaded = true;
             
             let build_start = std::time::Instant::now();
             
-            // Build instance data from all entities with Position + Velocity + Color
-            let mut instances = Vec::new();
+            // Micro-benchmark: timing each phase
+            let mut bench_reserve_us = 0u64;
+            let mut bench_copy_us = 0u64;
             
-            // Get archetypes that have all three components
+            // Build position + velocity (DYNAMIC) and color (STATIC)
+            let mut dynamic_data: Vec<InstanceDynamic> = Vec::new();
+            let mut static_data_built = self.last_instance_count > 0;
+            let mut static_data: Vec<InstanceStatic> = Vec::new();
+            
+            // PHASE 1: Query archetypes
+            let query_start = std::time::Instant::now();
             let position_archs = world.archetypes_with(Position::ID);
             let velocity_archs = world.archetypes_with(Velocity::ID);
             let color_archs = world.archetypes_with(Color::ID);
+            let bench_query_us = query_start.elapsed().as_micros() as u64;
             
+            // PHASE 2 & 3: Reserve + Copy loop
             for &arch_id in position_archs {
                 if !velocity_archs.contains(&arch_id) || !color_archs.contains(&arch_id) {
                     continue;
@@ -378,50 +417,125 @@ impl TriangleRenderer {
                     world.column::<Velocity>(arch_id),
                     world.column::<Color>(arch_id),
                 ) {
-                    instances.reserve(positions.len());
-                    
-                    for i in 0..positions.len() {
-                        instances.push(InstanceData {
-                            position: [positions[i].x, positions[i].y],
-                            velocity: [velocities[i].x, velocities[i].y],
-                            color: [colors[i].r, colors[i].g, colors[i].b],
-                            _padding: [0.0, 0.0],
-                        });
+                    // PHASE 2: Reserve space
+                    let reserve_start = std::time::Instant::now();
+                    let count = positions.len();
+                    dynamic_data.reserve(count);
+                    if !static_data_built {
+                        static_data.reserve(count);
                     }
+                    bench_reserve_us += reserve_start.elapsed().as_micros() as u64;
+                    
+                    // PHASE 3: Copy data using unsafe direct memory operations
+                    // This eliminates Vec::push bounds checks (5M × 2 = 10M checks!)
+                    let copy_start = std::time::Instant::now();
+                    
+                    unsafe {
+                        // Get raw pointers to the end of our vectors
+                        let dynamic_ptr = dynamic_data.as_mut_ptr().add(dynamic_data.len());
+                        let dynamic_start_len = dynamic_data.len();
+                        
+                        // Copy dynamic data (position + velocity)
+                        for i in 0..count {
+                            std::ptr::write(
+                                dynamic_ptr.add(i),
+                                InstanceDynamic {
+                                    position: [positions[i].x, positions[i].y],
+                                    velocity: [velocities[i].x, velocities[i].y],
+                                }
+                            );
+                        }
+                        dynamic_data.set_len(dynamic_start_len + count);
+                        
+                        // Copy static data (color only, first time)
+                        if !static_data_built {
+                            let static_ptr = static_data.as_mut_ptr().add(static_data.len());
+                            let static_start_len = static_data.len();
+                            
+                            for i in 0..count {
+                                std::ptr::write(
+                                    static_ptr.add(i),
+                                    InstanceStatic {
+                                        color: [colors[i].r, colors[i].g, colors[i].b, 0],
+                                    }
+                                );
+                            }
+                            static_data.set_len(static_start_len + count);
+                        }
+                    }
+                    
+                    bench_copy_us += copy_start.elapsed().as_micros() as u64;
                 }
             }
             
-            instance_count = instances.len();
-            self.last_instance_count = instance_count; // Store for non-physics frames
+            instance_count = dynamic_data.len();
+            self.last_instance_count = instance_count;
             
             timings.build_instances_us = build_start.elapsed().as_micros() as u64;
             
-            // Resize instance buffer if needed
+            // Print micro-benchmark results every 60 ticks (~1 second)
+            if tick % 60 == 0 {
+                println!("build_instances breakdown ({}K instances):", instance_count / 1000);
+                println!("  Query:   {:6} µs ({:5.1}%)", bench_query_us, 
+                    (bench_query_us as f64 / timings.build_instances_us as f64) * 100.0);
+                println!("  Reserve: {:6} µs ({:5.1}%)", bench_reserve_us,
+                    (bench_reserve_us as f64 / timings.build_instances_us as f64) * 100.0);
+                println!("  Copy:    {:6} µs ({:5.1}%)", bench_copy_us,
+                    (bench_copy_us as f64 / timings.build_instances_us as f64) * 100.0);
+                println!("  TOTAL:   {:6} µs", timings.build_instances_us);
+            }
+            
+            // Resize buffers if needed
             if instance_count > self.instance_buffer_capacity {
                 let new_capacity = instance_count.next_power_of_two();
-                let bytes_per_instance = std::mem::size_of::<InstanceData>();
-                println!("Resizing instance buffer: {} → {} instances ({} bytes/instance, {} KB total)", 
-                    self.instance_buffer_capacity, new_capacity, bytes_per_instance, 
-                    (new_capacity * bytes_per_instance) / 1024);
+                println!("Resizing instance buffers: {} → {} instances", 
+                    self.instance_buffer_capacity, new_capacity);
+                println!("  Static:  {} KB ({} bytes/instance)", 
+                    (new_capacity * std::mem::size_of::<InstanceStatic>()) / 1024,
+                    std::mem::size_of::<InstanceStatic>());
+                println!("  Dynamic: {} KB ({} bytes/instance)", 
+                    (new_capacity * std::mem::size_of::<InstanceDynamic>()) / 1024,
+                    std::mem::size_of::<InstanceDynamic>());
                 
-                self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Instance Buffer"),
-                    size: (std::mem::size_of::<InstanceData>() * new_capacity) as u64,
+                self.instance_static_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Instance Static Buffer"),
+                    size: (std::mem::size_of::<InstanceStatic>() * new_capacity) as u64,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
+                
+                self.instance_dynamic_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Instance Dynamic Buffer"),
+                    size: (std::mem::size_of::<InstanceDynamic>() * new_capacity) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                
                 self.instance_buffer_capacity = new_capacity;
+                static_data_built = false; // Force rebuild of static data with new buffer
             }
             
-            // Upload instance data to GPU (only on physics tick!)
+            // Upload instance data to GPU
             let upload_start = std::time::Instant::now();
-            if !instances.is_empty() {
+            
+            // Upload STATIC data (first tick only or after resize)
+            if !static_data_built && !static_data.is_empty() {
                 self.queue.write_buffer(
-                    &self.instance_buffer,
+                    &self.instance_static_buffer,
                     0,
-                    bytemuck::cast_slice(&instances),
+                    bytemuck::cast_slice(&static_data),
                 );
             }
+            
+            // Upload DYNAMIC data (every physics tick!)
+            if !dynamic_data.is_empty() {
+                self.queue.write_buffer(
+                    &self.instance_dynamic_buffer,
+                    0,
+                    bytemuck::cast_slice(&dynamic_data),
+                );
+            }
+            
             timings.upload_instances_us = upload_start.elapsed().as_micros() as u64;
         } else {
             // Not a physics tick - use the last uploaded instance count
@@ -477,7 +591,8 @@ impl TriangleRenderer {
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_dynamic_buffer.slice(..));  // Position
+            render_pass.set_vertex_buffer(2, self.instance_static_buffer.slice(..));   // Velocity + Color
             render_pass.draw(0..3, 0..(instance_count as u32)); // 3 vertices, N instances
         }
         
@@ -526,28 +641,37 @@ impl App {
     fn new() -> Self {
         let mut world = World::new();
         
-        // Spawn 100 triangles with random positions and velocities
+        // Spawn triangles with random positions and velocities
         use std::f32::consts::PI;
-        let num_triangles = 500000;
+        let num_triangles = 15_000_000; // 5 MILLION TRIANGLES!
         let f_num_triangles = num_triangles as f32;
         for i in 0..num_triangles {
             let angle = (i as f32 / f_num_triangles) * 2.0 * PI;
-            let radius = 0.5 + (i as f32 / f_num_triangles) * 0.3;
+            
+            // Distribute triangles across the visible area
+            // radius: 0.3-0.9 NDC = 3-9 meters = 300,000-900,000 units
+            let radius_ndc = 0.3 + (i as f32 / f_num_triangles) * 0.6;
+            let radius_units = (radius_ndc * UNITS_PER_NDC as f32) as i32;
 
+            // Position in game units (integer from the start!)
             let pos = Position {
-                x: angle.cos() * radius,
-                y: angle.sin() * radius,
+                x: ((angle.cos() * radius_units as f32) as i32),
+                y: ((angle.sin() * radius_units as f32) as i32),
             };
             
+            // Velocity: tangent to circle, moderate speed
+            // Target: ~3.0 meters/sec = 3.0 * 100,000 units/sec = 300,000 units/sec
+            // At 60 Hz: 300,000 / 60 = 5,000 units/tick (well within i16 range ±32,767)
+            let speed_units_per_tick = 5000;
             let vel = Velocity {
-                x: (angle + PI / 2.0).cos() * 0.2,
-                y: (angle + PI / 2.0).sin() * 0.2,
+                x: ((angle + PI / 2.0).cos() * speed_units_per_tick as f32) as i16,
+                y: ((angle + PI / 2.0).sin() * speed_units_per_tick as f32) as i16,
             };
             
             let color = Color {
-                r: ((i % 100) as f32 / 100.0),
-                g: (1.0 - (i % 100) as f32 / 100.0),
-                b: 0.5,
+                r: ((i % 100) * 255 / 100) as u8,
+                g: (255 - (i % 100) * 255 / 100) as u8,
+                b: 128,
             };
             
             spawn!(world, pos, vel, color);
@@ -644,9 +768,9 @@ impl ApplicationHandler for App {
                     self.profiler.time_system("render", || {
                         match renderer.render(&self.world, self.time.tick_count(), self.time.interpolation_alpha()) {
                             Ok((uploaded, instance_count, timings)) => {
-                                // Track bandwidth (only when actually uploaded)
+                                // Track bandwidth (only DYNAMIC data uploaded every tick)
                                 if uploaded {
-                                    let bytes_per_upload = instance_count * std::mem::size_of::<InstanceData>();
+                                    let bytes_per_upload = instance_count * std::mem::size_of::<InstanceDynamic>();
                                     self.total_bytes_uploaded += bytes_per_upload as u64;
                                     self.frame_count += 1;
                                 }
@@ -696,12 +820,12 @@ impl ApplicationHandler for App {
                     let render_ms = self.profiler.get_timing("render").as_secs_f64() * 1000.0;
                     println!("Systems: physics={:.2}ms, render={:.2}ms", physics_ms, render_ms);
                     
-                    // Bandwidth metrics
+                    // Bandwidth metrics (DYNAMIC position data only)
                     if self.frame_count > 0 {
                         let mb_uploaded = self.total_bytes_uploaded as f64 / (1024.0 * 1024.0);
                         let mb_per_sec = mb_uploaded / 2.0; // 2 second window
-                        println!("GPU upload: {:.2} MB/s ({} bytes/instance, {} uploads)", 
-                            mb_per_sec, std::mem::size_of::<InstanceData>(), self.frame_count);
+                        println!("GPU upload: {:.2} MB/s ({} bytes/instance DYNAMIC, {} uploads)", 
+                            mb_per_sec, std::mem::size_of::<InstanceDynamic>(), self.frame_count);
                         self.total_bytes_uploaded = 0;
                         self.frame_count = 0;
                     }

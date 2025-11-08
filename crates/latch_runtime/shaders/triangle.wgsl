@@ -12,12 +12,12 @@ struct VertexInput {
 }
 
 struct InstanceInput {
-    // Per-instance position (updated at physics rate)
-    @location(1) instance_position: vec2<f32>,
-    // Per-instance velocity (for interpolation)
-    @location(2) instance_velocity: vec2<f32>,
-    // Per-instance color (static)
-    @location(3) instance_color: vec3<f32>,
+    // Per-instance position (integer game units - 10 µm precision)
+    @location(1) instance_position: vec2<i32>,
+    // Per-instance velocity (i16 normalized to -1.0 to 1.0)
+    @location(2) instance_velocity: vec2<f32>,  // Snorm16x2 auto-normalizes to f32
+    // Per-instance color (u8 normalized to 0.0-1.0)
+    @location(3) instance_color: vec4<f32>,     // Unorm8x4 auto-normalizes to f32
 }
 
 struct Uniforms {
@@ -39,15 +39,26 @@ struct VertexOutput {
 fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     var out: VertexOutput;
     
-    // GPU-side interpolation: position + velocity * alpha * dt
-    // This gives us smooth motion without uploading every frame
-    let interpolated_pos = instance.instance_position + 
-                          instance.instance_velocity * uniforms.interpolation_alpha * uniforms.dt;
+    // Convert integer position to NDC (floating-point)
+    // UNITS_PER_NDC = 1,000,000 (1 NDC = 10 meters)
+    let position_ndc = vec2<f32>(instance.instance_position) / 1000000.0;
+    
+    // Velocity comes in as Snorm16x2 (normalized -1.0 to 1.0)
+    // Convert back to NDC units: velocity is in game units, position is in NDC
+    // vel_ndc = vel_normalized * 32767 / UNITS_PER_NDC
+    let vel_scale = 32767.0 / 1000000.0; // i16 max / UNITS_PER_NDC
+    let velocity_ndc = instance.instance_velocity * vel_scale;
+    
+    // GPU-side interpolation: position + velocity * alpha
+    let interpolated_pos = position_ndc + velocity_ndc * uniforms.interpolation_alpha;
     
     // Offset base vertex by interpolated instance position
     let world_pos = vertex.position + interpolated_pos;
     out.clip_position = vec4<f32>(world_pos, 0.0, 1.0);
-    out.color = instance.instance_color;
+    
+    // Color is already normalized by Unorm8x4 (0.0-1.0 range)
+    out.color = instance.instance_color.rgb;
+    
     return out;
 }
 
