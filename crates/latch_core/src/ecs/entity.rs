@@ -1,24 +1,16 @@
-//! Entity handle with generational index
-//!
-//! Entities are lightweight handles (8 bytes) that reference data in the World.
-//! The generation counter prevents use-after-free bugs.
+//! Entity handles with generational indexing
+
+use super::archetype::ArchetypeId;
 
 /// Entity handle (generation-indexed for safety)
 ///
 /// Format: [32-bit index | 32-bit generation]
 /// - Index: Position in entity metadata array
 /// - Generation: Incremented on entity destruction (prevents use-after-free)
-///
-/// Example:
-/// ```ignore
-/// let entity = world.spawn();
-/// world.despawn(entity);
-/// // entity handle is now invalid (generation mismatch)
-/// ```
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Entity {
-    index: u32,
-    generation: u32,
+    pub(crate) index: u32,
+    pub(crate) generation: u32,
 }
 
 impl Entity {
@@ -46,4 +38,13 @@ impl Entity {
             generation: (bits >> 32) as u32,
         }
     }
+}
+
+/// Entity metadata tracked by the World
+#[derive(Clone)]
+pub(crate) struct EntityMetadata {
+    pub generation: u32,
+    pub alive: bool,
+    pub archetype_id: ArchetypeId,
+    pub archetype_index: usize,
 }

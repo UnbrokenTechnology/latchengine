@@ -11,6 +11,10 @@ pub mod time;
 pub mod math;
 pub mod memory;
 
+// Re-export metrics from latch_metrics for convenience
+#[cfg(feature = "metrics")]
+pub use latch_metrics as metrics;
+
 pub use glam;
 
 /// Engine version

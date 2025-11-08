@@ -10,13 +10,14 @@ name = "latch"
 path = "src/main.rs"
 
 [dependencies]
-latch_core = { workspace = true }
+latch_core = { workspace = true, features = ["metrics"] }
 latch_render = { workspace = true }
 latch_net = { workspace = true }
 latch_script = { workspace = true }
 latch_asset = { workspace = true }
 latch_audio = { workspace = true }
 latch_services = { workspace = true }
+latch_metrics = { workspace = true, features = ["metrics"] }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

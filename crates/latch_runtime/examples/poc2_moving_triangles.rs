@@ -14,6 +14,7 @@
 use latch_core::ecs::World;
 use latch_core::time::{SimulationTime, InputRecorder, TickInput, TICK_DURATION_SECS};
 use latch_core::spawn;
+use latch_metrics::{FrameTimer, SystemProfiler};
 
 use winit::{
     application::ApplicationHandler,
@@ -116,6 +117,7 @@ struct TriangleRenderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    pub vertex_buffer_capacity: usize, // Track current buffer capacity (exposed for metrics)
 }
 
 impl TriangleRenderer {
@@ -219,10 +221,11 @@ impl TriangleRenderer {
             cache: None,
         });
         
-        // Create initial vertex buffer (will be updated each frame)
+        // Create initial vertex buffer (will grow dynamically if needed)
+        let initial_capacity = 1024; // Start with capacity for 1024 triangles
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * 3 * 100) as u64, // 100 triangles max
+            size: (std::mem::size_of::<Vertex>() * 3 * initial_capacity) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -234,6 +237,7 @@ impl TriangleRenderer {
             config,
             pipeline,
             vertex_buffer,
+            vertex_buffer_capacity: initial_capacity,
         }
     }
     
@@ -257,6 +261,23 @@ impl TriangleRenderer {
                     color: [color.r, color.g, color.b],
                 },
             ]);
+        }
+        
+        // Resize buffer if needed (vertices = triangles * 3)
+        let triangle_count = vertices.len() / 3;
+        if triangle_count > self.vertex_buffer_capacity {
+            // Grow buffer by doubling (amortized O(1) like Vec)
+            let new_capacity = triangle_count.next_power_of_two();
+            println!("Resizing vertex buffer: {} → {} triangles", 
+                self.vertex_buffer_capacity, new_capacity);
+            
+            self.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Vertex Buffer"),
+                size: (std::mem::size_of::<Vertex>() * 3 * new_capacity) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.vertex_buffer_capacity = new_capacity;
         }
         
         // Upload vertices to GPU
@@ -321,6 +342,9 @@ struct App {
     mouse_pos: (f32, f32),
     mouse_pressed: bool,
     mode: Mode,
+    frame_timer: FrameTimer,
+    profiler: SystemProfiler,
+    last_print: std::time::Instant,
 }
 
 enum Mode {
@@ -334,10 +358,12 @@ impl App {
         
         // Spawn 100 triangles with random positions and velocities
         use std::f32::consts::PI;
-        for i in 0..100 {
-            let angle = (i as f32 / 100.0) * 2.0 * PI;
-            let radius = 0.5 + (i as f32 / 100.0) * 0.3;
-            
+        let num_triangles = 100000;
+        let f_num_triangles = num_triangles as f32;
+        for i in 0..num_triangles {
+            let angle = (i as f32 / f_num_triangles) * 2.0 * PI;
+            let radius = 0.5 + (i as f32 / f_num_triangles) * 0.3;
+
             let pos = Position {
                 x: angle.cos() * radius,
                 y: angle.sin() * radius,
@@ -349,8 +375,8 @@ impl App {
             };
             
             let color = Color {
-                r: (i as f32 / 100.0),
-                g: (1.0 - i as f32 / 100.0),
+                r: ((i % 100) as f32 / 100.0),
+                g: (1.0 - (i % 100) as f32 / 100.0),
                 b: 0.5,
             };
             
@@ -369,10 +395,16 @@ impl App {
             mouse_pos: (0.0, 0.0),
             mouse_pressed: false,
             mode: Mode::Recording,
+            frame_timer: FrameTimer::new(60),
+            profiler: SystemProfiler::new(),
+            last_print: std::time::Instant::now(),
         }
     }
     
     fn tick(&mut self) {
+        // Begin frame timing
+        self.frame_timer.begin();
+        
         // Record input
         let input = TickInput {
             tick: self.time.tick_count(),
@@ -383,7 +415,9 @@ impl App {
         self.recorder.record(input);
         
         // Run physics
-        physics_system(&mut self.world, TICK_DURATION_SECS);
+        self.profiler.time_system("physics", || {
+            physics_system(&mut self.world, TICK_DURATION_SECS);
+        });
         
         // Check if we've recorded 1000 frames
         if matches!(self.mode, Mode::Recording) && self.time.tick_count() >= 1000 {
@@ -433,16 +467,46 @@ impl ApplicationHandler for App {
                 
                 // Render
                 if let Some(renderer) = &mut self.renderer {
-                    match renderer.render(&self.world) {
-                        Ok(_) => {}
-                        Err(wgpu::SurfaceError::Lost) => {
-                            // Reconfigure surface
+                    self.profiler.time_system("render", || {
+                        match renderer.render(&self.world) {
+                            Ok(_) => {}
+                            Err(wgpu::SurfaceError::Lost) => {
+                                // Reconfigure surface
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                event_loop.exit();
+                            }
+                            Err(e) => eprintln!("Render error: {:?}", e),
                         }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            event_loop.exit();
-                        }
-                        Err(e) => eprintln!("Render error: {:?}", e),
-                    }
+                    });
+                }
+                
+                // End frame
+                self.frame_timer.end();
+                
+                // Print metrics every 2 seconds
+                if self.last_print.elapsed() >= std::time::Duration::from_secs(2) {
+                    self.last_print = std::time::Instant::now();
+                    
+                    println!("\n=== Performance Metrics ===");
+                    println!("FPS: {:.1} ({:.2} ms avg)", 
+                        self.frame_timer.fps(), 
+                        self.frame_timer.frame_time_ms());
+                    
+                    let (min_ms, max_ms) = self.frame_timer.frame_time_range_ms();
+                    println!("Frame time range: {:.2}-{:.2} ms", min_ms, max_ms);
+                    
+                    println!("Entities: {} live, {} total",
+                        self.world.live_entity_count(),
+                        self.world.entity_count());
+                    
+                    // System timings
+                    let physics_ms = self.profiler.get_timing("physics").as_secs_f64() * 1000.0;
+                    let render_ms = self.profiler.get_timing("render").as_secs_f64() * 1000.0;
+                    println!("Systems: physics={:.2}ms, render={:.2}ms", physics_ms, render_ms);
+                    
+                    // Reset profiler for next period
+                    self.profiler.reset();
                 }
                 
                 // Request next frame

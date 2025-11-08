@@ -9,6 +9,7 @@ members = [
     "crates/latch_asset",
     "crates/latch_audio",
     "crates/latch_services",
+    "crates/latch_metrics",
     "crates/latch_runtime",
     "crates/latch_editor",
 ]
@@ -29,6 +30,7 @@ latch_script = { path = "crates/latch_script" }
 latch_asset = { path = "crates/latch_asset" }
 latch_audio = { path = "crates/latch_audio" }
 latch_services = { path = "crates/latch_services" }
+latch_metrics = { path = "crates/latch_metrics" }
 
 # External dependencies (versions centralized)
 winit = "0.30"
