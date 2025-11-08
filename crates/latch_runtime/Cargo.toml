@@ -27,3 +27,4 @@ anyhow = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
 pollster = "0.3"  # For blocking on async (examples only)
+bytemuck = { version = "1.14", features = ["derive"] }

@@ -10,12 +10,12 @@ pub struct ScriptHandle(pub u64);
 
 impl From<Entity> for ScriptHandle {
     fn from(entity: Entity) -> Self {
-        ScriptHandle(entity.id())
+        ScriptHandle(entity.to_bits())
     }
 }
 
 impl From<ScriptHandle> for Entity {
     fn from(handle: ScriptHandle) -> Self {
-        Entity::from_raw(handle.0)
+        Entity::from_bits(handle.0)
     }
 }
