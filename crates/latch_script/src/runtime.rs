@@ -5,6 +5,7 @@ use std::path::Path;
 
 /// Script execution context
 pub struct ScriptContext {
+    #[allow(dead_code)] // Kept alive for context lifetime
     runtime: Runtime,
     context: Context,
 }

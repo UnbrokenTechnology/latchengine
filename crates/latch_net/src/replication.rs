@@ -5,6 +5,7 @@ pub type Tick = u64;
 
 /// Input buffer for rollback
 pub struct InputBuffer {
+    #[allow(dead_code)] // Placeholder for Phase 0
     buffer_size: usize,
 }
 

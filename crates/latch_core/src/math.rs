@@ -6,6 +6,7 @@ pub use glam::*;
 
 /// Deterministic random number generator (placeholder)
 pub struct DeterministicRng {
+    #[allow(dead_code)] // Will be used for re-seeding in full implementation
     seed: u64,
     state: u64,
 }
