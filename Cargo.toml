@@ -50,6 +50,9 @@ dashmap = "6.1"  # Concurrent HashMap
 # ECS experimentation (we may write our own, but good reference)
 hecs = "0.10"
 
+# Examples/dev-only
+pollster = "0.3"  # Block on async in examples
+
 [profile.dev]
 opt-level = 1  # Slight optimization for better dev perf
 debug = true

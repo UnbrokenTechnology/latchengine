@@ -8,11 +8,12 @@ A Rust-first, TypeScript-scripted, cross‑platform game engine focused on fast 
 	•	Cross‑platform developer tools: First‑class support on Windows, macOS, and Linux with no compromises or emulation.
 	•	Ultra‑fast iteration: Hot reload, near‑instant script turnaround, and low editor overhead.
 	•	Ship anywhere: One authoring surface that targets desktop, mobile, web, and consoles.
-	•	Runtime performance: 60 FPS minimum on low‑spec (“toaster”) hardware via auto‑scaling and fallbacks.
+	•	Runtime performance: 60 FPS minimum on low‑spec ("toaster") hardware via auto‑scaling and fallbacks.
 	•	Opinionated defaults: Deterministic sim, strict data contracts, and curated workflows to reduce foot‑guns.
 	•	Source control built‑in: Git + LFS + GCM integrated directly into the editor.
 	•	Massively multiplayer ready: Unified net model scales from single‑player to MMO without code forks.
 	•	Language model: Engine and runtime libraries in Rust; gameplay in TypeScript for most code, Rust for hot paths.
+	•	Quake 3 performance target: Games that look like Quake 3 should run as fast as Quake 3 on equivalent hardware—including full CPU fallback with frustum culling, occlusion, and PVS (Potentially Visible Set) for low-poly scenes.
 
 Non‑Goals: Native authoring for cutting‑edge GPU features (e.g., custom HLSL/GLSL pipelines, ray tracing) or translation layers like Wine.
 
@@ -64,6 +65,7 @@ Non‑Goals: Native authoring for cutting‑edge GPU features (e.g., custom HLSL
 4.2 Universal Renderer Floor
 	•	GPU floor: D3D9 / OpenGL 2.1 / WebGL 1 class.
 	•	CPU fallback: SIMD software rasterizer (SSE2/NEON). All platforms can render via GPU or CPU path.
+	•	Quake 3 benchmark: Software rasterizer must handle Quake 3-era geometry (5-10k tris/frame) at 60 FPS on period-appropriate hardware (Pentium III / equivalent). Modern low-poly games targeting this aesthetic should run as fast as the original.
 
 4.3 Capability Probes & Strategy Binding
 	1.	Probe device/API caps (extensions, MRT count, uniform limits, etc.).
@@ -82,6 +84,7 @@ Non‑Goals: Native authoring for cutting‑edge GPU features (e.g., custom HLSL
 	•	Shadows → Depth map → fallback: projected blob/static texture.
 	•	Reflections → Static cubemap → fallback: screen‑quad fake.
 	•	Particles/PostFX → GPU compute/VBO updates or MRT → fallback: CPU batches/multi‑pass.
+	•	Visibility culling → Frustum culling (always) + occlusion queries (GPU) → fallback: PVS (Potentially Visible Set, Quake-style pre-baked room-to-room visibility) for static geometry.
 
 All strategies target visually equivalent results; only performance varies.
 
