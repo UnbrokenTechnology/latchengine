@@ -83,9 +83,58 @@ pub struct ArchetypeStorage {
 - Spawn: O(1) pop (or grow if empty)
 - No shifting, no reallocations
 
+## Double-Buffering for Determinism
+
+**Critical for parallel physics**: Components use double-buffering (ping-pong buffers) to ensure deterministic updates.
+
+### The Problem
+
+Without double-buffering, parallel updates create race conditions:
+```rust
+// Entity A and B collide
+// If A processes first: reads B.old_velocity, writes A.new_velocity
+// If B processes first: reads A.old_velocity, writes B.new_velocity
+// Different order → different results! (non-deterministic)
+```
+
+### The Solution
+
+Two buffers per component column:
+- **Current buffer**: Read-only during tick (stable state from last tick)
+- **Next buffer**: Write-only during tick (new state for next tick)
+- **Swap after tick**: Next becomes current
+
+```rust
+loop {
+    // All systems read from current, write to next
+    physics_system(&mut world, dt);
+    collision_system(&mut world);
+    
+    // Swap: next becomes current
+    world.swap_buffers();
+}
+```
+
+Processing order now irrelevant—all reads see identical stable state.
+
+### Memory Cost
+
+Doubles RAM usage for component data only:
+- Textures, meshes, audio: NOT doubled (not in ECS)
+- Position, velocity, stats: Doubled (typically <10 MB total)
+- Trade-off: ~5-10 MB extra RAM for guaranteed determinism
+
+### Implementation Details
+
+- Each `Column` has `buffers: [Vec<u8>; 2]`
+- `current_buffer: usize` tracks which is "read" (0 or 1)
+- Reads use `buffers[current_buffer]`
+- Writes use `buffers[1 - current_buffer]`
+- `swap_buffers()` flips index and copies current→next
+
 ## Parallel Iteration
 
-SoA enables safe parallelism:
+SoA + double-buffering enables safe parallelism:
 
 ```rust
 world.for_each::<Position>(|pos| {

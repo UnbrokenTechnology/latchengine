@@ -276,6 +276,43 @@ impl World {
             }
         }
     }
+
+    /// Swap read/write buffers for all archetypes.
+    /// 
+    /// **Call this once per physics tick** after all systems have executed.
+    /// This makes all writes from this tick visible for reading on the next tick,
+    /// ensuring deterministic parallel updates.
+    /// 
+    /// # Determinism
+    /// 
+    /// Without double-buffering, the order in which entities are processed matters:
+    /// - Entity A collides with Entity B
+    /// - If A is processed first, it reads B's old velocity and writes A's new velocity
+    /// - If B is processed first, it reads A's old velocity and writes B's new velocity
+    /// - Different processing orders → different results (non-deterministic)
+    /// 
+    /// With double-buffering:
+    /// - All entities read from the "current" buffer (stable state from last tick)
+    /// - All entities write to the "next" buffer (new state for next tick)
+    /// - Processing order doesn't matter because reads always see the same values
+    /// - After all systems finish, swap buffers to make new state current
+    /// 
+    /// # Example
+    /// ```ignore
+    /// loop {
+    ///     // Systems read from "current" buffer, write to "next" buffer
+    ///     physics_system(&mut world, dt);
+    ///     collision_system(&mut world);
+    ///     
+    ///     // Make next buffer current for the next tick
+    ///     world.swap_buffers();
+    /// }
+    /// ```
+    pub fn swap_buffers(&mut self) {
+        for storage in self.storages.values_mut() {
+            storage.swap_buffers();
+        }
+    }
 }
 
 impl Default for World {

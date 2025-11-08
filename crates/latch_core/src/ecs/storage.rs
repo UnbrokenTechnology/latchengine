@@ -29,6 +29,9 @@ macro_rules! columns_mut {
         // Collect component IDs and verify uniqueness at compile time
         let ids = [$(<$T as $crate::ecs::Component>::ID),+];
         
+        // Get the next buffer index (what we write to)
+        let next_buffer = $storage.next_buffer_index();
+        
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
             $storage.get_column_ptr(<$T as $crate::ecs::Component>::ID)
@@ -48,7 +51,7 @@ macro_rules! columns_mut {
             let mut idx = 0;
             ($(
                 {
-                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice::<$T>(ptrs[idx]);
+                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice::<$T>(ptrs[idx], next_buffer);
                     idx += 1;
                     slice
                 }
@@ -61,6 +64,11 @@ macro_rules! columns_mut {
 /// 
 /// Uses Structure-of-Arrays (SoA) layout for cache efficiency and
 /// easy parallel iteration.
+/// 
+/// Uses double-buffering for deterministic parallel updates:
+/// - Read from "current" buffer (stable state)
+/// - Write to "next" buffer (new state)
+/// - Swap buffers each physics tick
 pub struct ArchetypeStorage {
     pub archetype: Archetype,
     pub(crate) columns: HashMap<ComponentId, Column>,
@@ -68,6 +76,8 @@ pub struct ArchetypeStorage {
     free: Vec<usize>,
     entity_ids: Vec<Option<u64>>,
     pub(crate) entity_generations: Vec<u32>,
+    /// Which buffer is currently being read from (0 or 1)
+    current_buffer: usize,
 }
 
 impl ArchetypeStorage {
@@ -80,7 +90,27 @@ impl ArchetypeStorage {
             free: Vec::new(),
             entity_ids: Vec::new(),
             entity_generations: Vec::new(),
+            current_buffer: 0,
         }
+    }
+
+    /// Get the index of the next buffer (the one being written to).
+    pub fn next_buffer_index(&self) -> usize {
+        1 - self.current_buffer
+    }
+
+    /// Swap read/write buffers.
+    /// 
+    /// Call this once per physics tick after all systems have executed.
+    /// This makes the "write" buffer become the new "read" buffer.
+    /// 
+    /// **Performance**: This is just an index flip - O(1) operation, no memcpy!
+    /// The buffers themselves stay in place; we just swap which one is "current".
+    pub fn swap_buffers(&mut self) {
+        self.current_buffer = 1 - self.current_buffer;
+        // That's it! No copying needed.
+        // What was "next" is now "current" (contains latest state)
+        // What was "current" is now "next" (will be overwritten next tick)
     }
 
     /// Ensure a column exists for the given component.
@@ -119,12 +149,15 @@ impl ArchetypeStorage {
     }
 
     /// Write component data to a specific row.
+    /// 
+    /// Writes to the "next" buffer (the one not currently being read from).
     pub fn write_component(&mut self, row: usize, cid: ComponentId, bytes: &[u8]) {
         let col = self
             .columns
             .get_mut(&cid)
             .expect("column not initialized");
-        col.write_row(row, bytes);
+        let next_buffer = 1 - self.current_buffer;
+        col.write_row(next_buffer, row, bytes);
     }
 
     /// Record which entity is at a given row.
@@ -156,14 +189,19 @@ impl ArchetypeStorage {
     }
 
     /// Get raw bytes for a component at a specific row.
+    /// 
+    /// Reads from the "current" buffer (stable state).
     pub fn row_bytes(&self, cid: ComponentId, row: usize) -> Option<&[u8]> {
         let col = self.columns.get(&cid)?;
         let size = col.elem_size;
         let start = row * size;
-        Some(&col.bytes[start..start + size])
+        let bytes = col.current_bytes(self.current_buffer);
+        Some(&bytes[start..start + size])
     }
 
     /// Get typed reference to a component at a specific row.
+    /// 
+    /// Reads from the "current" buffer (stable state).
     /// 
     /// # Safety
     /// Caller must ensure:
@@ -173,21 +211,28 @@ impl ArchetypeStorage {
     pub fn row_typed<T: Component>(&self, row: usize) -> Option<&T> {
         let col = self.columns.get(&T::ID)?;
         let start = row * std::mem::size_of::<T>();
+        let bytes = col.current_bytes(self.current_buffer);
         
         // Safety: Column ensures proper alignment and layout
-        Some(unsafe { &*(col.bytes[start..].as_ptr() as *const T) })
+        Some(unsafe { &*(bytes[start..].as_ptr() as *const T) })
     }
 
     /// Get typed mutable reference to a component at a specific row.
+    /// 
+    /// Writes to the "next" buffer (the one not currently being read from).
     pub fn row_typed_mut<T: Component>(&mut self, row: usize) -> Option<&mut T> {
         let col = self.columns.get_mut(&T::ID)?;
         let start = row * std::mem::size_of::<T>();
+        let next_buffer = 1 - self.current_buffer;
+        let bytes = col.next_bytes_mut(next_buffer);
         
         // Safety: Column ensures proper alignment and layout
-        Some(unsafe { &mut *(col.bytes[start..].as_mut_ptr() as *mut T) })
+        Some(unsafe { &mut *(bytes[start..].as_mut_ptr() as *mut T) })
     }
 
     /// Get an immutable typed slice of all components of type T.
+    /// 
+    /// Reads from the "current" buffer (stable state).
     pub fn column_as_slice<T: Component>(&self) -> Option<&[T]> {
         let meta = meta_of(T::ID)?;
         let col = self.columns.get(&T::ID)?;
@@ -199,23 +244,27 @@ impl ArchetypeStorage {
             meta.name
         );
         
+        let bytes = col.current_bytes(self.current_buffer);
+        
         // Alignment safety check
         debug_assert_eq!(
-            col.bytes.as_ptr() as usize % std::mem::align_of::<T>(),
+            bytes.as_ptr() as usize % std::mem::align_of::<T>(),
             0,
             "Column for {} is misaligned (expected align={})",
             meta.name,
             std::mem::align_of::<T>()
         );
         
-        let ptr = col.bytes.as_ptr();
-        let len = col.bytes.len() / meta.size;
+        let ptr = bytes.as_ptr();
+        let len = bytes.len() / meta.size;
         
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts(ptr as *const T, len) })
     }
 
     /// Get a mutable typed slice of all components of type T.
+    /// 
+    /// Writes to the "next" buffer (the one not currently being read from).
     pub fn column_as_slice_mut<T: Component>(&mut self) -> Option<&mut [T]> {
         let meta = meta_of(T::ID)?;
         let col = self.columns.get_mut(&T::ID)?;
@@ -227,17 +276,20 @@ impl ArchetypeStorage {
             meta.name
         );
         
+        let next_buffer = 1 - self.current_buffer;
+        let bytes = col.next_bytes_mut(next_buffer);
+        
         // Alignment safety check
         debug_assert_eq!(
-            col.bytes.as_ptr() as usize % std::mem::align_of::<T>(),
+            bytes.as_ptr() as usize % std::mem::align_of::<T>(),
             0,
             "Column for {} is misaligned (expected align={})",
             meta.name,
             std::mem::align_of::<T>()
         );
         
-        let ptr = col.bytes.as_mut_ptr();
-        let len = col.bytes.len() / meta.size;
+        let ptr = bytes.as_mut_ptr();
+        let len = bytes.len() / meta.size;
         
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts_mut(ptr as *mut T, len) })
@@ -247,6 +299,8 @@ impl ArchetypeStorage {
     /// 
     /// This is safe because T1 and T2 are stored in separate columns.
     /// Panics if T1::ID == T2::ID (same component type).
+    /// 
+    /// Writes to the "next" buffer.
     pub fn two_columns_mut<T1: Component, T2: Component>(&mut self) -> Option<(&mut [T1], &mut [T2])> {
         assert_ne!(T1::ID, T2::ID, "Cannot get two mutable references to the same component");
         
@@ -256,6 +310,8 @@ impl ArchetypeStorage {
         let col1_ptr = self.columns.get_mut(&T1::ID)? as *mut Column;
         let col2_ptr = self.columns.get_mut(&T2::ID)? as *mut Column;
         
+        let next_buffer = 1 - self.current_buffer;
+        
         // Safety: We've verified T1::ID != T2::ID, so these are different columns
         unsafe {
             let col1 = &mut *col1_ptr;
@@ -264,14 +320,17 @@ impl ArchetypeStorage {
             assert_eq!(meta1.size, col1.elem_size);
             assert_eq!(meta2.size, col2.elem_size);
             
-            debug_assert_eq!(col1.bytes.as_ptr() as usize % std::mem::align_of::<T1>(), 0);
-            debug_assert_eq!(col2.bytes.as_ptr() as usize % std::mem::align_of::<T2>(), 0);
+            let bytes1 = &mut col1.buffers[next_buffer];
+            let bytes2 = &mut col2.buffers[next_buffer];
             
-            let ptr1 = col1.bytes.as_mut_ptr() as *mut T1;
-            let len1 = col1.bytes.len() / meta1.size;
+            debug_assert_eq!(bytes1.as_ptr() as usize % std::mem::align_of::<T1>(), 0);
+            debug_assert_eq!(bytes2.as_ptr() as usize % std::mem::align_of::<T2>(), 0);
             
-            let ptr2 = col2.bytes.as_mut_ptr() as *mut T2;
-            let len2 = col2.bytes.len() / meta2.size;
+            let ptr1 = bytes1.as_mut_ptr() as *mut T1;
+            let len1 = bytes1.len() / meta1.size;
+            
+            let ptr2 = bytes2.as_mut_ptr() as *mut T2;
+            let len2 = bytes2.len() / meta2.size;
             
             Some((
                 std::slice::from_raw_parts_mut(ptr1, len1),
@@ -296,62 +355,64 @@ impl ArchetypeStorage {
     /// - ptr must be a valid pointer returned from get_column_ptr
     /// - T must match the actual component type stored in that column
     /// - No other references to this column may exist
+    /// - buffer_idx must be valid (0 or 1)
     #[doc(hidden)]
-    pub unsafe fn column_ptr_to_slice<T: Component>(ptr: *mut u8) -> &'static mut [T] {
+    pub unsafe fn column_ptr_to_slice<T: Component>(ptr: *mut u8, buffer_idx: usize) -> &'static mut [T] {
         let col = &mut *(ptr as *mut Column);
-        col.as_slice_mut::<T>()
+        col.as_slice_mut::<T>(buffer_idx)
     }
 }
 
-/// A single component column (raw byte storage).
+/// A single component column (raw byte storage with double-buffering).
 /// 
-/// Uses aligned allocation to ensure safe transmutation to typed slices.
+/// Uses two buffers for deterministic parallel updates:
+/// - Buffer 0 and Buffer 1
+/// - One is "current" (read), one is "next" (write)
+/// - Buffers swap each physics tick
 pub(crate) struct Column {
     elem_size: usize,
     elem_align: usize,
-    bytes: Vec<u8>,
+    buffers: [Vec<u8>; 2],
 }
 
 impl Column {
-    /// Create a new column with proper alignment.
+    /// Create a new column with proper alignment and double-buffering.
     fn new(meta: ComponentMeta) -> Self {
         Self {
             elem_size: meta.size,
             elem_align: meta.align,
-            bytes: Vec::new(),
+            buffers: [Vec::new(), Vec::new()],
         }
     }
 
-    /// Get a typed mutable slice from this column.
-    /// 
-    /// # Safety
-    /// Caller must ensure T matches the actual component type stored.
-    pub(crate) unsafe fn as_slice_mut<T: Component>(&mut self) -> &mut [T] {
-        let meta = meta_of(T::ID).expect("Component not registered");
-        assert_eq!(meta.size, self.elem_size);
-        debug_assert_eq!(self.bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
-        
-        let ptr = self.bytes.as_mut_ptr() as *mut T;
-        let len = self.bytes.len() / meta.size;
-        std::slice::from_raw_parts_mut(ptr, len)
+    /// Get the current read buffer.
+    fn current_bytes(&self, current_buffer: usize) -> &[u8] {
+        &self.buffers[current_buffer]
     }
 
-    /// Grow the column by one element.
+    /// Get the next write buffer (mutable).
+    fn next_bytes_mut(&mut self, next_buffer: usize) -> &mut [u8] {
+        &mut self.buffers[next_buffer]
+    }
+
+    /// Grow both buffers by one element.
     fn grow_one(&mut self) {
-        let target = self.bytes.len() + self.elem_size;
-        self.bytes.resize(target, 0);
-        
-        // Verify alignment (Vec<u8> typically has good alignment from allocator)
-        debug_assert_eq!(
-            self.bytes.as_ptr() as usize % self.elem_align,
-            0,
-            "Column lost alignment after resize (elem_align={})",
-            self.elem_align
-        );
+        for buffer in &mut self.buffers {
+            let target = buffer.len() + self.elem_size;
+            buffer.resize(target, 0);
+            
+            // Verify alignment (Vec<u8> typically has good alignment from allocator)
+            debug_assert_eq!(
+                buffer.as_ptr() as usize % self.elem_align,
+                0,
+                "Column lost alignment after resize (elem_align={})",
+                self.elem_align
+            );
+        }
     }
 
-    /// Write component data to a specific row.
-    fn write_row(&mut self, row: usize, src: &[u8]) {
+    /// Write component data to a specific row in a specific buffer.
+    fn write_row(&mut self, buffer_idx: usize, row: usize, src: &[u8]) {
         assert_eq!(
             src.len(),
             self.elem_size,
@@ -361,6 +422,23 @@ impl Column {
         );
         
         let start = row * self.elem_size;
-        self.bytes[start..start + self.elem_size].copy_from_slice(src);
+        let buffer = &mut self.buffers[buffer_idx];
+        buffer[start..start + self.elem_size].copy_from_slice(src);
+    }
+
+    /// Get a typed mutable slice from this column.
+    /// 
+    /// # Safety
+    /// Caller must ensure T matches the actual component type stored.
+    pub(crate) unsafe fn as_slice_mut<T: Component>(&mut self, buffer_idx: usize) -> &mut [T] {
+        let meta = meta_of(T::ID).expect("Component not registered");
+        assert_eq!(meta.size, self.elem_size);
+        
+        let bytes = &mut self.buffers[buffer_idx];
+        debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
+        
+        let ptr = bytes.as_mut_ptr() as *mut T;
+        let len = bytes.len() / meta.size;
+        std::slice::from_raw_parts_mut(ptr, len)
     }
 }

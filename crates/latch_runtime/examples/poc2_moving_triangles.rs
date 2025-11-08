@@ -712,10 +712,14 @@ impl App {
         };
         self.recorder.record(input);
         
-        // Run physics
+        // Run physics (writes to "next" buffer)
         self.profiler.time_system("physics", || {
             physics_system(&mut self.world, TICK_DURATION_SECS);
         });
+        
+        // Swap buffers: make "next" become "current" for the next tick
+        // This ensures deterministic parallel updates
+        self.world.swap_buffers();
         
         // Check if we've recorded 1000 frames
         if matches!(self.mode, Mode::Recording) && self.time.tick_count() >= 1000 {
