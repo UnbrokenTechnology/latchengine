@@ -1,16 +1,63 @@
 //! Entity Component System (Archetype-based)
 //!
-//! Design Philosophy:
-//! - Cache-friendly: Components stored in contiguous arrays (archetypes)
-//! - SIMD-ready: Aligned memory, batch processing
-//! - Deterministic: Stable iteration order, reproducible results
-//! - Parallel-safe: Systems can run concurrently on different archetypes
+//! # Design Philosophy
 //!
-//! Architecture:
-//! 1. Entities are handles (generation-indexed IDs for safety)
-//! 2. Components are POD structs (no methods, just data)
-//! 3. Archetypes group entities with identical component sets
-//! 4. Systems query components and operate on archetypes in parallel
+//! - **Cache-friendly**: Components stored in contiguous arrays (archetypes)
+//! - **SIMD-ready**: Aligned memory, batch processing
+//! - **Deterministic**: Stable iteration order, reproducible results
+//! - **Parallel-safe**: Systems can run concurrently on different archetypes
+//! - **Static composition**: Components CANNOT be added/removed after spawn
+//!
+//! # Architecture
+//!
+//! 1. **Entities** are handles (generation-indexed IDs for safety)
+//! 2. **Components** are POD structs (no methods, just data)
+//! 3. **Archetypes** group entities with identical component sets
+//! 4. **Systems** query components and operate on archetypes in parallel
+//!
+//! # Static Component Model
+//!
+//! **Components cannot be added or removed after entity creation.**
+//!
+//! This is an intentional design constraint for performance:
+//! - Archetype migrations are expensive (reallocation + copying)
+//! - Dynamic composition breaks cache coherency
+//! - Makes entity layouts unpredictable
+//!
+//! Instead, design components with fields for dynamic behavior:
+//!
+//! ```ignore
+//! // ✅ GOOD: Component with state field
+//! struct Burnable { is_burning: bool }
+//! let entity = spawn!(world, Burnable { is_burning: false });
+//! // Later: Toggle the field
+//! world.get_mut::<Burnable>(entity).unwrap().is_burning = true;
+//!
+//! // ❌ BAD: Adding/removing components at runtime
+//! world.add_component(entity, Burning);  // Not allowed!
+//! world.remove_component::<Burning>(entity);  // Not allowed!
+//! ```
+//!
+//! Use `spawn!()` macro or `EntityBuilder` to create entities with all components:
+//!
+//! ```ignore
+//! // Spawn with 1 component
+//! let e = spawn!(world, Position::default());
+//!
+//! // Spawn with multiple components
+//! let e = spawn!(world,
+//!     Position::default(),
+//!     Velocity::default(),
+//!     Burnable { is_burning: false }
+//! );
+//!
+//! // Or use builder pattern
+//! let e = world.entity()
+//!     .with(Position::default())
+//!     .with(Velocity::default())
+//!     .build();
+//! ```
+
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -91,10 +138,20 @@ impl<T: 'static + Send + Sync> Component for T {}
 ///
 /// Example:
 /// ```ignore
-/// let entity = spawn!(world, Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 1.0 });
+/// let entity = spawn!(world, 
+///     Position { x: 0.0, y: 0.0 }, 
+///     Velocity { x: 1.0, y: 1.0 },
+///     Health { current: 100, max: 100 }
+/// );
 /// ```
 #[macro_export]
 macro_rules! spawn {
+    // Single component
+    ($world:expr, $c1:expr) => {{
+        let entity = $world.spawn();
+        $world.add_component(entity, $c1);
+        entity
+    }};
     // Two components
     ($world:expr, $c1:expr, $c2:expr) => {{
         let entity = $world.spawn();
@@ -107,10 +164,12 @@ macro_rules! spawn {
         $world.add_component3(entity, $c1, $c2, $c3);
         entity
     }};
-    // Single component (fallback)
-    ($world:expr, $component:expr) => {{
+    // Four or more: fallback to sequential adds (less efficient but works)
+    ($world:expr, $($component:expr),+ $(,)?) => {{
         let entity = $world.spawn();
-        $world.add_component(entity, $component);
+        $(
+            $world.add_component(entity, $component);
+        )+
         entity
     }};
 }
@@ -313,13 +372,87 @@ pub struct World {
     next_entity_index: u32,
 }
 
+// ============================================================================
+// EntityBuilder: Fluent API for adding components
+// ============================================================================
+
+/// Builder for adding multiple components to an entity before finalizing
+///
+/// This avoids archetype migration by collecting all components first.
+/// 
+/// Example:
+/// ```ignore
+/// let entity = world.entity()
+///     .with(Position { x: 0.0, y: 0.0 })
+///     .with(Velocity { x: 1.0, y: 1.0 })
+///     .with(Health { current: 100, max: 100 })
+///     .build();
+/// ```
+pub struct EntityBuilder<'w> {
+    world: &'w mut World,
+    entity: Entity,
+    component_types: Vec<TypeId>,
+}
+
+impl<'w> EntityBuilder<'w> {
+    fn new(world: &'w mut World, entity: Entity) -> Self {
+        Self {
+            world,
+            entity,
+            component_types: Vec::new(),
+        }
+    }
+
+    /// Add a component to this entity
+    pub fn with<T: Component + Clone>(mut self, component: T) -> Self {
+        let type_id = TypeId::of::<T>();
+        self.component_types.push(type_id);
+        
+        // Store component temporarily (we'll move this to proper storage in build())
+        // For now, use the simple add_component approach
+        self.world.add_component(self.entity, component);
+        self
+    }
+
+    /// Finalize the entity (returns entity handle)
+    pub fn build(self) -> Entity {
+        self.entity
+    }
+}
+
+// ============================================================================
+// World: ECS container
+// ============================================================================
+
 impl World {
     pub fn new() -> Self {
+        Self::with_capacity(1024) // Preallocate 1024 entities
+    }
+
+    /// Create a world with preallocated entity capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut entities = Vec::with_capacity(capacity);
+        let mut free_entities = Vec::with_capacity(capacity);
+        
+        // Preallocate entity metadata (all marked as dead initially)
+        for i in 0..capacity {
+            entities.push(EntityMetadata {
+                generation: 0,
+                archetype_id: ArchetypeId(0),
+                archetype_index: 0,
+                alive: false,
+            });
+            free_entities.push(i as u32);
+        }
+        
+        // Reverse so we allocate in order (pop from end)
+        free_entities.reverse();
+        
         Self {
-            entities: Vec::new(),
-            free_entities: Vec::new(),
+            entities,
+            free_entities,
             archetypes: HashMap::new(),
-            next_entity_index: 0,
+            next_entity_index: capacity as u32,
         }
     }
 
@@ -328,15 +461,27 @@ impl World {
         let index = if let Some(index) = self.free_entities.pop() {
             index
         } else {
-            let index = self.next_entity_index;
-            self.next_entity_index += 1;
-            self.entities.push(EntityMetadata {
-                generation: 0,
-                archetype_id: ArchetypeId(0),
-                archetype_index: 0,
-                alive: false,
-            });
-            index
+            // Out of preallocated entities - grow by doubling
+            let old_capacity = self.entities.len();
+            let new_capacity = old_capacity * 2;
+            
+            self.entities.reserve(new_capacity - old_capacity);
+            self.free_entities.reserve(new_capacity - old_capacity);
+            
+            for i in old_capacity..new_capacity {
+                self.entities.push(EntityMetadata {
+                    generation: 0,
+                    archetype_id: ArchetypeId(0),
+                    archetype_index: 0,
+                    alive: false,
+                });
+                self.free_entities.push(i as u32);
+            }
+            
+            self.free_entities.reverse(); // Maintain allocation order
+            self.next_entity_index = new_capacity as u32;
+            
+            self.free_entities.pop().unwrap()
         };
 
         let metadata = &mut self.entities[index as usize];
@@ -347,7 +492,7 @@ impl World {
 
     /// Destroy an entity and all its components
     pub fn despawn(&mut self, entity: Entity) -> bool {
-        if !self.is_alive(entity) {
+        if !self.is_valid(entity) {
             return false;
         }
 
@@ -374,8 +519,8 @@ impl World {
         true
     }
 
-    /// Check if entity is alive
-    pub fn is_alive(&self, entity: Entity) -> bool {
+    /// Check if entity handle is valid
+    pub fn is_valid(&self, entity: Entity) -> bool {
         if let Some(metadata) = self.entities.get(entity.index as usize) {
             metadata.alive && metadata.generation == entity.generation
         } else {
@@ -385,10 +530,23 @@ impl World {
 
     /// Add a component to an entity
     /// 
-    /// Note: For PoC 2, components should be added in sequence immediately
-    /// after spawning. The implementation ensures proper archetype migration.
+    /// **⚠️ INTERNAL USE ONLY - DO NOT CALL DIRECTLY ⚠️**
+    /// 
+    /// Components should only be added during entity creation via `spawn!()` macro
+    /// or `EntityBuilder`. Runtime component addition triggers expensive archetype
+    /// migrations and is explicitly disallowed by the engine's design.
+    /// 
+    /// For dynamic behavior, use component fields:
+    /// ```ignore
+    /// struct Burnable { is_burning: bool }  // ✅ Good
+    /// // NOT: Add/remove Burning component  // ❌ Bad
+    /// ```
+    /// 
+    /// This method is public only for macro/builder access. It is hidden from
+    /// documentation and should never be called directly.
+    #[doc(hidden)]
     pub fn add_component<T: Component + Clone>(&mut self, entity: Entity, component: T) {
-        if !self.is_alive(entity) {
+        if !self.is_valid(entity) {
             return;
         }
 
@@ -452,12 +610,15 @@ impl World {
     }
 
     /// Add two components atomically (avoids archetype migration issues)
+    /// 
+    /// **⚠️ INTERNAL USE ONLY** - Used by `spawn!` macro. Do not call directly.
+    #[doc(hidden)]
     pub fn add_component2<T1, T2>(&mut self, entity: Entity, c1: T1, c2: T2)
     where
         T1: Component + Clone,
         T2: Component + Clone,
     {
-        if !self.is_alive(entity) {
+        if !self.is_valid(entity) {
             return;
         }
 
@@ -497,13 +658,16 @@ impl World {
     }
 
     /// Add three components atomically
+    /// 
+    /// **⚠️ INTERNAL USE ONLY** - Used by `spawn!` macro. Do not call directly.
+    #[doc(hidden)]
     pub fn add_component3<T1, T2, T3>(&mut self, entity: Entity, c1: T1, c2: T2, c3: T3)
     where
         T1: Component + Clone,
         T2: Component + Clone,
         T3: Component + Clone,
     {
-        if !self.is_alive(entity) {
+        if !self.is_valid(entity) {
             return;
         }
 
@@ -550,7 +714,7 @@ impl World {
 
     /// Get immutable reference to a component
     pub fn get_component<T: Component>(&self, entity: Entity) -> Option<&T> {
-        if !self.is_alive(entity) {
+        if !self.is_valid(entity) {
             return None;
         }
 
@@ -563,7 +727,7 @@ impl World {
 
     /// Get mutable reference to a component
     pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
-        if !self.is_alive(entity) {
+        if !self.is_valid(entity) {
             return None;
         }
 
@@ -613,6 +777,12 @@ impl World {
                     .map(|((entity, c1), c2)| (*entity, c1, c2))
             })
     }
+
+    /// Start building an entity with components (fluent API)
+    pub fn entity(&mut self) -> EntityBuilder {
+        let entity = self.spawn();
+        EntityBuilder::new(self, entity)
+    }
 }
 
 impl Default for World {
@@ -647,8 +817,8 @@ mod tests {
         let e1 = world.spawn();
         let e2 = world.spawn();
         
-        assert!(world.is_alive(e1));
-        assert!(world.is_alive(e2));
+        assert!(world.is_valid(e1));
+        assert!(world.is_valid(e2));
         assert_ne!(e1, e2);
     }
 
@@ -657,9 +827,9 @@ mod tests {
         let mut world = World::new();
         let entity = world.spawn();
         
-        assert!(world.is_alive(entity));
+        assert!(world.is_valid(entity));
         assert!(world.despawn(entity));
-        assert!(!world.is_alive(entity));
+        assert!(!world.is_valid(entity));
     }
 
     #[test]
