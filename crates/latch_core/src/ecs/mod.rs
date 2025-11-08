@@ -10,4 +10,4 @@ mod macros;
 
 pub use entity::Entity;
 pub use component::Component;
-pub use world::{World, EntityBuilder};
+pub use world::World;

@@ -125,160 +125,41 @@ impl World {
         }
     }
 
-    /// Add a component to an entity
+    /// Single spawn method that handles any number of components
     /// 
-    /// **⚠️ INTERNAL USE ONLY - DO NOT CALL DIRECTLY ⚠️**
+    /// The macro generates the type-specific storage pushes, but this method
+    /// handles the archetype calculation and entity placement.
     #[doc(hidden)]
-    pub fn add_component<T: Component + Clone>(&mut self, entity: Entity, component: T) {
-        if !self.is_valid(entity) {
-            return;
-        }
-
-        let type_id = TypeId::of::<T>();
-        let metadata = &self.entities[entity.index as usize];
-        let old_archetype_id = metadata.archetype_id;
-
-        // Calculate new archetype
-        let new_types = if old_archetype_id.0 == 0 {
-            vec![type_id]
-        } else {
-            let mut types = self.archetypes
-                .get(&old_archetype_id)
-                .map(|a| a.component_types.clone())
-                .unwrap_or_default();
-            
-            if types.contains(&type_id) {
-                // Component already exists, update in place
-                if let Some(archetype) = self.archetypes.get_mut(&old_archetype_id) {
-                    if let Some(storage) = archetype.get_storage_mut::<T>() {
-                        if let Some(existing) = storage.get_mut(metadata.archetype_index) {
-                            *existing = component;
-                        }
-                    }
-                }
-                return;
-            }
-            
-            types.push(type_id);
-            types
-        };
-
-        let new_archetype_id = ArchetypeId::from_types(&new_types);
-
-        // Ensure archetype exists
-        if !self.archetypes.contains_key(&new_archetype_id) {
-            let archetype = Archetype::new(new_archetype_id, new_types.clone());
-            self.archetypes.insert(new_archetype_id, archetype);
-        }
-
-        // Ensure storage exists
-        if !self.archetypes.get(&new_archetype_id).unwrap().components.contains_key(&type_id) {
-            self.archetypes.get_mut(&new_archetype_id).unwrap().add_storage::<T>();
-        }
-
-        // Add to new archetype
-        let new_archetype = self.archetypes.get_mut(&new_archetype_id).unwrap();
-        let new_index = new_archetype.push_entity(entity);
+    pub fn spawn_with_components(
+        &mut self,
+        type_ids: Vec<TypeId>,
+        insert_components: impl FnOnce(&mut Archetype),
+    ) -> Entity {
+        let entity = self.spawn();
         
-        if let Some(storage) = new_archetype.get_storage_mut::<T>() {
-            storage.push(component);
-        }
-
-        // Update metadata
-        let metadata = &mut self.entities[entity.index as usize];
-        metadata.archetype_id = new_archetype_id;
-        metadata.archetype_index = new_index;
-    }
-
-    /// Add two components atomically
-    #[doc(hidden)]
-    pub fn add_component2<T1, T2>(&mut self, entity: Entity, c1: T1, c2: T2)
-    where
-        T1: Component + Clone,
-        T2: Component + Clone,
-    {
-        if !self.is_valid(entity) {
-            return;
-        }
-
-        let types = vec![TypeId::of::<T1>(), TypeId::of::<T2>()];
-        let archetype_id = ArchetypeId::from_types(&types);
-
+        // Calculate archetype from component types
+        let archetype_id = ArchetypeId::from_types(&type_ids);
+        
+        // Create archetype if it doesn't exist
         if !self.archetypes.contains_key(&archetype_id) {
-            let archetype = Archetype::new(archetype_id, types.clone());
+            let archetype = Archetype::new(archetype_id, type_ids.clone());
             self.archetypes.insert(archetype_id, archetype);
         }
-
-        let archetype = self.archetypes.get_mut(&archetype_id).unwrap();
-        if !archetype.components.contains_key(&TypeId::of::<T1>()) {
-            archetype.add_storage::<T1>();
-        }
-        if !archetype.components.contains_key(&TypeId::of::<T2>()) {
-            archetype.add_storage::<T2>();
-        }
-
-        let archetype = self.archetypes.get_mut(&archetype_id).unwrap();
-        let index = archetype.push_entity(entity);
         
-        if let Some(storage) = archetype.get_storage_mut::<T1>() {
-            storage.push(c1);
-        }
-        if let Some(storage) = archetype.get_storage_mut::<T2>() {
-            storage.push(c2);
-        }
-
+        // Let the macro-generated closure insert components into storage
+        let archetype = self.archetypes.get_mut(&archetype_id).unwrap();
+        insert_components(archetype);
+        
+        // Add entity to archetype (AFTER components are inserted)
+        let index = archetype.entities.len();
+        archetype.entities.push(entity);
+        
+        // Update entity metadata
         let metadata = &mut self.entities[entity.index as usize];
         metadata.archetype_id = archetype_id;
         metadata.archetype_index = index;
-    }
-
-    /// Add three components atomically
-    #[doc(hidden)]
-    pub fn add_component3<T1, T2, T3>(&mut self, entity: Entity, c1: T1, c2: T2, c3: T3)
-    where
-        T1: Component + Clone,
-        T2: Component + Clone,
-        T3: Component + Clone,
-    {
-        if !self.is_valid(entity) {
-            return;
-        }
-
-        let types = vec![TypeId::of::<T1>(), TypeId::of::<T2>(), TypeId::of::<T3>()];
-        let archetype_id = ArchetypeId::from_types(&types);
-
-        if !self.archetypes.contains_key(&archetype_id) {
-            let archetype = Archetype::new(archetype_id, types.clone());
-            self.archetypes.insert(archetype_id, archetype);
-        }
-
-        let archetype = self.archetypes.get_mut(&archetype_id).unwrap();
-        if !archetype.components.contains_key(&TypeId::of::<T1>()) {
-            archetype.add_storage::<T1>();
-        }
-        if !archetype.components.contains_key(&TypeId::of::<T2>()) {
-            archetype.add_storage::<T2>();
-        }
-        if !archetype.components.contains_key(&TypeId::of::<T3>()) {
-            archetype.add_storage::<T3>();
-        }
-
-        let archetype = self.archetypes.get_mut(&archetype_id).unwrap();
-        let index = archetype.push_entity(entity);
         
-        if let Some(storage) = archetype.get_storage_mut::<T1>() {
-            storage.push(c1);
-        }
-        if let Some(storage) = archetype.get_storage_mut::<T2>() {
-            storage.push(c2);
-        }
-        if let Some(storage) = archetype.get_storage_mut::<T3>() {
-            storage.push(c3);
-        }
-
-        let metadata = &mut self.entities[entity.index as usize];
-        metadata.archetype_id = archetype_id;
-        metadata.archetype_index = index;
+        entity
     }
 
     /// Get component reference
@@ -344,12 +225,6 @@ impl World {
                     .map(|((entity, c1), c2)| (*entity, c1, c2))
             })
     }
-
-    /// Start building an entity (fluent API)
-    pub fn entity(&mut self) -> EntityBuilder<'_> {
-        let entity = self.spawn();
-        EntityBuilder::new(self, entity)
-    }
     
     /// Entity count
     pub fn entity_count(&self) -> usize {
@@ -385,35 +260,5 @@ impl World {
 impl Default for World {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Builder for adding multiple components before finalizing
-pub struct EntityBuilder<'w> {
-    world: &'w mut World,
-    entity: Entity,
-    component_types: Vec<TypeId>,
-}
-
-impl<'w> EntityBuilder<'w> {
-    fn new(world: &'w mut World, entity: Entity) -> Self {
-        Self {
-            world,
-            entity,
-            component_types: Vec::new(),
-        }
-    }
-
-    /// Add a component
-    pub fn with<T: Component + Clone>(mut self, component: T) -> Self {
-        let type_id = TypeId::of::<T>();
-        self.component_types.push(type_id);
-        self.world.add_component(self.entity, component);
-        self
-    }
-
-    /// Finalize entity
-    pub fn build(self) -> Entity {
-        self.entity
     }
 }

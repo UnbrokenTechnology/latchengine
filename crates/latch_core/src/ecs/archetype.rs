@@ -26,8 +26,9 @@ impl ArchetypeId {
 /// All entities in an archetype have the exact same set of components.
 /// Components are stored in separate contiguous arrays (SoA layout) for cache efficiency.
 pub(crate) struct Archetype {
-    #[allow(dead_code)] // Used for debugging and future query optimization
+    #[allow(dead_code)] // Used for debugging and archetype queries
     pub id: ArchetypeId,
+    #[allow(dead_code)] // Used for archetype migrations (though we don't support them at runtime)
     pub component_types: Vec<TypeId>,
     pub entities: Vec<Entity>,
     pub components: HashMap<TypeId, Box<dyn ComponentStorage>>,
