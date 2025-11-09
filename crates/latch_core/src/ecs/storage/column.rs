@@ -2,6 +2,16 @@
 //
 // Each column stores all instances of a single component type in a
 // Structure-of-Arrays layout for cache efficiency.
+//
+// # Double-Buffering
+//
+// Each column maintains two buffers to enable deterministic parallel updates:
+// - Systems read from the "current" buffer (stable state from last tick)
+// - Systems write to the "next" buffer (new state for next tick)
+// - After all systems complete, buffers are swapped
+//
+// This ensures that processing order doesn't affect results - all systems
+// see the same input state regardless of execution order.
 
 use crate::ecs::{Component, ComponentMeta, meta_of};
 

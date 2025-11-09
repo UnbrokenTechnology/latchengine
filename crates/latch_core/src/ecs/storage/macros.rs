@@ -2,6 +2,34 @@
 //
 // These macros provide a safe, ergonomic interface for accessing multiple
 // component slices simultaneously from archetype storage.
+//
+// # Safety
+//
+// The macros ensure safety by:
+// 1. Verifying all component IDs are unique at runtime
+// 2. Getting separate column pointers that don't alias
+// 3. Respecting the double-buffer read/write separation
+//
+// This allows safe parallel access to different component types while
+// preventing undefined behavior from aliasing mutable references.
+//
+// # Example
+//
+// ```ignore
+// use latch_core::{columns, columns_mut};
+//
+// // Read from current buffer
+// let positions = columns!(storage, Position);
+//
+// // Write to next buffer
+// let velocities = columns_mut!(storage, Velocity);
+//
+// // Read multiple (current buffer)
+// let (pos, vel) = columns!(storage, Position, Velocity);
+//
+// // Write multiple (next buffer)
+// let (pos_out, vel_out) = columns_mut!(storage, Position, Velocity);
+// ```
 
 /// Macro to get multiple immutable component slices from a storage.
 /// 
