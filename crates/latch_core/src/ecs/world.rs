@@ -30,6 +30,10 @@ impl World {
     /// 
     /// The entity's archetype is calculated from its components and never changes.
     /// Uses object pooling to reuse despawned entity slots.
+    /// 
+    /// **Double-buffering note**: Component data is written to BOTH buffers during spawn
+    /// to ensure the entity is immediately readable on the current tick and writable
+    /// on the next tick. This prevents uninitialized data issues.
     pub fn spawn(&mut self, builder: EntityBuilder) -> Entity {
         let archetype = builder.archetype();
 

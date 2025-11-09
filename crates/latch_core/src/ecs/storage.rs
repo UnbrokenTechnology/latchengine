@@ -6,8 +6,63 @@
 use crate::ecs::{Archetype, Component, ComponentId, ComponentMeta, Entity, meta_of};
 use std::collections::HashMap;
 
+/// Macro to get multiple immutable component slices from a storage.
+/// 
+/// Reads from the "current" buffer (stable state from last tick).
+/// Handles any number of components using compile-time validation.
+/// 
+/// # Example
+/// ```ignore
+/// let positions = columns!(storage, Position);
+/// let (positions, velocities) = columns!(storage, Position, Velocity);
+/// let (a, b, c) = columns!(storage, ComponentA, ComponentB, ComponentC);
+/// ```
+#[macro_export]
+macro_rules! columns {
+    // Single component - just call the method directly
+    ($storage:expr, $T:ty) => {
+        $storage.column_as_slice::<$T>().unwrap()
+    };
+    
+    // Multiple components - use the general implementation
+    ($storage:expr, $($T:ty),+ $(,)?) => {{
+        // Collect component IDs and verify uniqueness at compile time
+        let ids = [$(<$T as $crate::ecs::Component>::ID),+];
+        
+        // Get the current buffer index (what we read from)
+        let current_buffer = $storage.current_buffer_index();
+        
+        // Get raw pointers to each column
+        let ptrs = [$(unsafe {
+            $storage.get_column_ptr_const(<$T as $crate::ecs::Component>::ID)
+                .expect("Component not found in archetype")
+        }),+];
+        
+        // Runtime verification that all IDs are unique (not strictly necessary for immutable, but consistent)
+        for i in 0..ids.len() {
+            for j in (i+1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "Duplicate component IDs in query");
+            }
+        }
+        
+        // SAFETY: We've verified all component IDs are unique, so these point to different columns.
+        // Each column is independently readable.
+        unsafe {
+            let mut idx = 0;
+            ($(
+                {
+                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice_const::<$T>(ptrs[idx], current_buffer);
+                    idx += 1;
+                    slice
+                }
+            ),+)
+        }
+    }};
+}
+
 /// Macro to get multiple mutable component slices from a storage.
 /// 
+/// Writes to the "next" buffer (the one not currently being read from).
 /// Handles any number of components using compile-time validation.
 /// 
 /// # Example
@@ -94,6 +149,11 @@ impl ArchetypeStorage {
         }
     }
 
+    /// Get the index of the current buffer (the one being read from).
+    pub fn current_buffer_index(&self) -> usize {
+        self.current_buffer
+    }
+
     /// Get the index of the next buffer (the one being written to).
     pub fn next_buffer_index(&self) -> usize {
         1 - self.current_buffer
@@ -150,14 +210,18 @@ impl ArchetypeStorage {
 
     /// Write component data to a specific row.
     /// 
-    /// Writes to the "next" buffer (the one not currently being read from).
+    /// Writes to **both** buffers to ensure data is immediately available.
+    /// This is necessary for entity spawning - we need the data to be readable
+    /// on the current tick, not just after the next buffer swap.
     pub fn write_component(&mut self, row: usize, cid: ComponentId, bytes: &[u8]) {
         let col = self
             .columns
             .get_mut(&cid)
             .expect("column not initialized");
-        let next_buffer = 1 - self.current_buffer;
-        col.write_row(next_buffer, row, bytes);
+        
+        // Write to BOTH buffers so data is immediately readable and writable
+        col.write_row(0, row, bytes);
+        col.write_row(1, row, bytes);
     }
 
     /// Record which entity is at a given row.
@@ -339,7 +403,17 @@ impl ArchetypeStorage {
         }
     }
 
-    /// Get a raw pointer to a column for use in the columns_mut! macro.
+    /// Get a raw const pointer to a column for use in the columns! macro.
+    /// 
+    /// # Safety
+    /// This returns a raw pointer that the caller must use safely.
+    /// The macro ensures uniqueness of component IDs before dereferencing.
+    #[doc(hidden)]
+    pub unsafe fn get_column_ptr_const(&self, cid: ComponentId) -> Option<*const u8> {
+        self.columns.get(&cid).map(|col| col as *const Column as *const u8)
+    }
+
+    /// Get a raw mutable pointer to a column for use in the columns_mut! macro.
     /// 
     /// # Safety
     /// This returns a raw pointer that the caller must use safely.
@@ -349,7 +423,19 @@ impl ArchetypeStorage {
         self.columns.get_mut(&cid).map(|col| col as *mut Column as *mut u8)
     }
 
-    /// Convert a raw column pointer to a typed slice.
+    /// Convert a raw column pointer to a typed immutable slice.
+    /// 
+    /// # Safety
+    /// - ptr must be a valid pointer returned from get_column_ptr_const
+    /// - T must match the actual component type stored in that column
+    /// - buffer_idx must be valid (0 or 1)
+    #[doc(hidden)]
+    pub unsafe fn column_ptr_to_slice_const<T: Component>(ptr: *const u8, buffer_idx: usize) -> &'static [T] {
+        let col = &*(ptr as *const Column);
+        col.as_slice::<T>(buffer_idx)
+    }
+
+    /// Convert a raw column pointer to a typed mutable slice.
     /// 
     /// # Safety
     /// - ptr must be a valid pointer returned from get_column_ptr
@@ -424,6 +510,22 @@ impl Column {
         let start = row * self.elem_size;
         let buffer = &mut self.buffers[buffer_idx];
         buffer[start..start + self.elem_size].copy_from_slice(src);
+    }
+
+    /// Get a typed immutable slice from this column.
+    /// 
+    /// # Safety
+    /// Caller must ensure T matches the actual component type stored.
+    pub(crate) unsafe fn as_slice<T: Component>(&self, buffer_idx: usize) -> &[T] {
+        let meta = meta_of(T::ID).expect("Component not registered");
+        assert_eq!(meta.size, self.elem_size);
+        
+        let bytes = &self.buffers[buffer_idx];
+        debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
+        
+        let ptr = bytes.as_ptr() as *const T;
+        let len = bytes.len() / meta.size;
+        std::slice::from_raw_parts(ptr, len)
     }
 
     /// Get a typed mutable slice from this column.
