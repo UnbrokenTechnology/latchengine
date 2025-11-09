@@ -2,11 +2,30 @@
 //
 // The World owns all archetypes and provides APIs for spawning, despawning,
 // and querying entities.
+//
+// # Query Patterns
+//
+// For single-component queries, use `query()`:
+// ```ignore
+// for (entity, position) in world.query::<Position>() {
+//     // ...
+// }
+// ```
+//
+// For multi-component queries, use `par_for_each()` with the `columns!` and `columns_mut!` macros:
+// ```ignore
+// world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
+//     let positions = columns!(storage, Position);
+//     let velocities = columns_mut!(storage, Velocity);
+//     // Process with rayon for parallelism
+//     velocities.par_iter_mut().zip(positions.par_iter())
+//         .for_each(|(vel, pos)| { /* ... */ });
+// });
+// ```
 
 use crate::ecs::{
     ArchetypeId, ArchetypeStorage, Component, ComponentId, Entity, EntityBuilder,
 };
-use rayon::prelude::*;
 use std::collections::{hash_map::Entry, HashMap};
 
 /// The main ECS world containing all entities and components.
@@ -129,6 +148,13 @@ impl World {
     /// Iterate over entities with a single component type.
     /// 
     /// Returns (Entity, &Component) for each entity.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// for (entity, position) in world.query::<Position>() {
+    ///     println!("Entity {:?} at {:?}", entity, position);
+    /// }
+    /// ```
     pub fn query<T: Component>(&self) -> impl Iterator<Item = (Entity, &T)> + '_ {
         let archetypes = self.archetypes_with(T::ID);
         
@@ -144,62 +170,6 @@ impl World {
             }))
         })
         .flatten()
-    }
-
-    /// Iterate over entities with two component types.
-    /// 
-    /// Returns (Entity, &C1, &C2) for each entity.
-    pub fn query2<T1: Component, T2: Component>(
-        &self,
-    ) -> impl Iterator<Item = (Entity, &T1, &T2)> + '_ {
-        let archs1 = self.archetypes_with(T1::ID);
-        let archs2 = self.archetypes_with(T2::ID);
-        
-        // Find intersection
-        let intersection: Vec<ArchetypeId> = archs1
-            .iter()
-            .filter(|a| archs2.contains(a))
-            .copied()
-            .collect();
-        
-        intersection.into_iter().flat_map(move |arch_id| {
-            let storage = self.storages.get(&arch_id)?;
-            let slice1 = storage.column_as_slice::<T1>()?;
-            let slice2 = storage.column_as_slice::<T2>()?;
-            
-            Some((0..storage.len()).filter_map(move |row| {
-                let eid = storage.entity_at(row)?;
-                let generation = storage.entity_generations[row];
-                let entity = Entity::new(eid, generation, arch_id, row);
-                Some((entity, &slice1[row], &slice2[row]))
-            }))
-        })
-        .flatten()
-    }
-
-    /// Parallel iteration over all components of a type.
-    /// 
-    /// Processes components in parallel chunks for efficiency.
-    pub fn for_each<T, F>(&mut self, f: F)
-    where
-        T: Component + Send,
-        F: Fn(&mut T) + Sync + Send,
-    {
-        let Some(ids) = self.comp_index.get(&T::ID) else {
-            return;
-        };
-
-        for &arch_id in ids {
-            if let Some(storage) = self.storages.get_mut(&arch_id) {
-                if let Some(slice) = storage.column_as_slice_mut::<T>() {
-                    slice.par_chunks_mut(1024).for_each(|chunk| {
-                        for x in chunk {
-                            f(x);
-                        }
-                    });
-                }
-            }
-        }
     }
 
     /// Iterate over archetypes that have ALL of the specified components.
@@ -254,17 +224,24 @@ impl World {
 
     /// Execute a function on all entities with the specified components.
     /// 
-    /// This is the high-level ergonomic API. Use `columns_mut!` macro to extract
-    /// component slices, then iterate with rayon for parallelism.
+    /// This is the primary API for multi-component iteration.
+    /// Use `columns!` and `columns_mut!` macros to extract component slices,
+    /// then iterate with rayon for parallelism.
     /// 
     /// # Example
     /// ```ignore
+    /// use latch_core::{columns, columns_mut};
+    /// 
     /// world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
-    ///     let (positions, velocities) = columns_mut!(storage, Position, Velocity);
-    ///     positions.par_iter_mut().zip(velocities.par_iter_mut())
-    ///         .for_each(|(pos, vel)| {
-    ///             pos.x += vel.x * dt;
-    ///             pos.y += vel.y * dt;
+    ///     // Read positions, write velocities
+    ///     let positions = columns!(storage, Position);
+    ///     let velocities = columns_mut!(storage, Velocity);
+    ///     
+    ///     // Parallel iteration
+    ///     velocities.par_iter_mut().zip(positions.par_iter())
+    ///         .for_each(|(vel, pos)| {
+    ///             vel.x += pos.x * dt;
+    ///             vel.y += pos.y * dt;
     ///         });
     /// });
     /// ```
@@ -323,5 +300,25 @@ impl Default for World {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Convenience macro for spawning entities.
+/// 
+/// This provides a more ergonomic way to spawn entities with multiple components.
+/// 
+/// # Example
+/// ```ignore
+/// let entity = spawn!(world,
+///     Position { x: 1.0, y: 2.0 },
+///     Velocity { x: 0.5, y: 0.0 }
+/// );
+/// ```
+#[macro_export]
+macro_rules! spawn {
+    ($world:expr, $($comp:expr),+ $(,)?) => {{
+        let builder = $crate::ecs::EntityBuilder::new()
+            $(.with($comp))+;
+        $world.spawn(builder)
+    }};
 }
 
