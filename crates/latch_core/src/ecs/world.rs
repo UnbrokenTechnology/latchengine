@@ -1,27 +1,4 @@
-// world.rs - ECS World with entity management and queries
-//
-// The World owns all archetypes and provides APIs for spawning, despawning,
-// and querying entities.
-//
-// # Query Patterns
-//
-// For single-component queries, use `query()`:
-// ```ignore
-// for (entity, position) in world.query::<Position>() {
-//     // ...
-// }
-// ```
-//
-// For multi-component queries, use `par_for_each()` with the `columns!` and `columns_mut!` macros:
-// ```ignore
-// world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
-//     let positions = columns!(storage, Position);
-//     let velocities = columns_mut!(storage, Velocity);
-//     // Process with rayon for parallelism
-//     velocities.par_iter_mut().zip(positions.par_iter())
-//         .for_each(|(vel, pos)| { /* ... */ });
-// });
-// ```
+// world.rs - ECS World with entity management and iteration
 
 use crate::ecs::{
     ArchetypeId, ArchetypeStorage, Component, ComponentId, Entity, EntityBuilder,
@@ -145,33 +122,6 @@ impl World {
         self.comp_index.get(&cid).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Iterate over entities with a single component type.
-    /// 
-    /// Returns (Entity, &Component) for each entity.
-    /// 
-    /// # Example
-    /// ```ignore
-    /// for (entity, position) in world.query::<Position>() {
-    ///     println!("Entity {:?} at {:?}", entity, position);
-    /// }
-    /// ```
-    pub fn query<T: Component>(&self) -> impl Iterator<Item = (Entity, &T)> + '_ {
-        let archetypes = self.archetypes_with(T::ID);
-        
-        archetypes.iter().flat_map(move |&arch_id| {
-            let storage = self.storages.get(&arch_id)?;
-            let slice = storage.column_as_slice::<T>()?;
-            
-            Some((0..storage.len()).filter_map(move |row| {
-                let eid = storage.entity_at(row)?;
-                let generation = storage.entity_generations[row];
-                let entity = Entity::new(eid, generation, arch_id, row);
-                Some((entity, &slice[row]))
-            }))
-        })
-        .flatten()
-    }
-
     /// Iterate over archetypes that have ALL of the specified components.
     /// 
     /// This is the low-level primitive for zero-cost multi-component iteration.
@@ -225,27 +175,25 @@ impl World {
     /// Execute a function on all entities with the specified components.
     /// 
     /// This is the primary API for multi-component iteration.
-    /// Use `columns!` and `columns_mut!` macros to extract component slices,
-    /// then iterate with rayon for parallelism.
+    /// Use `columns!` and `columns_mut!` macros to extract component slices.
     /// 
     /// # Example
     /// ```ignore
     /// use latch_core::{columns, columns_mut};
     /// 
-    /// world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
-    ///     // Read positions, write velocities
+    /// world.for_each(&[Position::ID, Velocity::ID], |storage| {
     ///     let positions = columns!(storage, Position);
     ///     let velocities = columns_mut!(storage, Velocity);
     ///     
-    ///     // Parallel iteration
-    ///     velocities.par_iter_mut().zip(positions.par_iter())
+    ///     // Iterate and update components
+    ///     velocities.iter_mut().zip(positions.iter())
     ///         .for_each(|(vel, pos)| {
     ///             vel.x += pos.x * dt;
     ///             vel.y += pos.y * dt;
     ///         });
     /// });
     /// ```
-    pub fn par_for_each<F>(&mut self, component_ids: &[ComponentId], mut f: F)
+    pub fn for_each<F>(&mut self, component_ids: &[ComponentId], mut f: F)
     where
         F: FnMut(&mut ArchetypeStorage),
     {

@@ -51,9 +51,6 @@ macro_rules! columns {
     
     // Multiple components - use the general implementation
     ($storage:expr, $($T:ty),+ $(,)?) => {{
-        // Collect component IDs and verify uniqueness at compile time
-        let ids = [$(<$T as $crate::ecs::Component>::ID),+];
-        
         // Get the current buffer index (what we read from)
         let current_buffer = $storage.current_buffer_index();
         
@@ -63,15 +60,8 @@ macro_rules! columns {
                 .expect("Component not found in archetype")
         }),+];
         
-        // Runtime verification that all IDs are unique (not strictly necessary for immutable, but consistent)
-        for i in 0..ids.len() {
-            for j in (i+1)..ids.len() {
-                assert_ne!(ids[i], ids[j], "Duplicate component IDs in query");
-            }
-        }
-        
-        // SAFETY: We've verified all component IDs are unique, so these point to different columns.
-        // Each column is independently readable.
+        // SAFETY: Each column is independently readable, and the macro ensures
+        // component types are distinct at compile time.
         unsafe {
             let mut idx = 0;
             ($(

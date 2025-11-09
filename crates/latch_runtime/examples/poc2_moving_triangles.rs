@@ -91,7 +91,7 @@ fn physics_system(world: &mut World, _dt: f32) {
     // - Write to "next" buffer (new state for next tick)
     // - No floating-point, no drift, perfect replay.
     
-    world.par_for_each(&[Position::ID, Velocity::ID], |storage| {
+    world.for_each(&[Position::ID, Velocity::ID], |storage| {
         // Read from "current" buffer, write to "next" buffer
         let (pos_read, vel_read) = columns!(storage, Position, Velocity);
         let (pos_write, vel_write) = columns_mut!(storage, Position, Velocity);

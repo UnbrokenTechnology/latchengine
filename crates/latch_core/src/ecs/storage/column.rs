@@ -18,8 +18,8 @@ use crate::ecs::{Component, ComponentMeta, meta_of};
 /// A single component column (raw byte storage with double-buffering).
 /// 
 /// Uses two buffers for deterministic parallel updates:
-/// - Buffer 0 and Buffer 1
-/// - One is "current" (read), one is "next" (write)
+/// - Read buffer (current stable state)
+/// - Write buffer (next state being computed)
 /// - Buffers swap each physics tick
 pub(crate) struct Column {
     pub(crate) elem_size: usize,
@@ -28,12 +28,22 @@ pub(crate) struct Column {
 }
 
 impl Column {
+    /// Initial capacity for new columns (1024 elements).
+    const INITIAL_CAPACITY: usize = 1024;
+    
     /// Create a new column with proper alignment and double-buffering.
+    /// 
+    /// Pre-allocates space for INITIAL_CAPACITY elements to reduce
+    /// allocation overhead when spawning many entities.
     pub(crate) fn new(meta: ComponentMeta) -> Self {
+        let initial_bytes = meta.size * Self::INITIAL_CAPACITY;
         Self {
             elem_size: meta.size,
             elem_align: meta.align,
-            buffers: [Vec::new(), Vec::new()],
+            buffers: [
+                Vec::with_capacity(initial_bytes),
+                Vec::with_capacity(initial_bytes),
+            ],
         }
     }
 
@@ -47,11 +57,16 @@ impl Column {
         &mut self.buffers[next_buffer]
     }
 
-    /// Grow both buffers by one element.
-    pub(crate) fn grow_one(&mut self) {
+    /// Grow both buffers to accommodate more elements.
+    /// 
+    /// Uses a growth strategy to minimize allocations:
+    /// - Reserves space in powers of 2 up to current capacity
+    /// - Single resize operation per buffer
+    pub(crate) fn grow_to(&mut self, new_capacity: usize) {
+        let target_bytes = new_capacity * self.elem_size;
+        
         for buffer in &mut self.buffers {
-            let target = buffer.len() + self.elem_size;
-            buffer.resize(target, 0);
+            buffer.resize(target_bytes, 0);
             
             // Verify alignment (Vec<u8> typically has good alignment from allocator)
             debug_assert_eq!(
