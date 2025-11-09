@@ -22,6 +22,7 @@ latch_metrics = { workspace = true, features = ["metrics"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+wasmi = "0.51.1"
 
 [dev-dependencies]
 # For examples only
@@ -30,3 +31,5 @@ wgpu = { workspace = true }
 pollster = "0.3"  # For blocking on async (examples only)
 bytemuck = { version = "1.14", features = ["derive"] }
 rayon = { workspace = true }  # For parallel iteration in examples
+serde_json = { workspace = true }  # For TypeScript FFI example
+rquickjs = { workspace = true }  # For TypeScript FFI example
