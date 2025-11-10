@@ -172,16 +172,19 @@ impl World {
         self.storages.values()
     }
 
-    /// Execute a function on all entities with the specified components.
+    /// Execute a function on all archetypes with the specified components.
     /// 
-    /// This is the primary API for multi-component iteration.
+    /// **Internal API**: This is a low-level primitive for archetype iteration.
+    /// Most users should use the higher-level `for_each_entity!` macro instead,
+    /// which hides archetype details and provides a cleaner API.
+    /// 
     /// Use `columns!` and `columns_mut!` macros to extract component slices.
     /// 
     /// # Example
     /// ```ignore
     /// use latch_core::{columns, columns_mut};
     /// 
-    /// world.for_each(&[Position::ID, Velocity::ID], |storage| {
+    /// world.for_each_archetype_with_components(&[Position::ID, Velocity::ID], |storage| {
     ///     let positions = columns!(storage, Position);
     ///     let velocities = columns_mut!(storage, Velocity);
     ///     
@@ -193,7 +196,7 @@ impl World {
     ///         });
     /// });
     /// ```
-    pub fn for_each<F>(&mut self, component_ids: &[ComponentId], mut f: F)
+    pub(crate) fn for_each_archetype_with_components<F>(&mut self, component_ids: &[ComponentId], mut f: F)
     where
         F: FnMut(&mut ArchetypeStorage),
     {
@@ -247,6 +250,56 @@ impl World {
 impl Default for World {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::Component;
+    use crate::{define_component, spawn, for_each_entity};
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Position {
+        x: i32,
+        y: i32,
+    }
+    define_component!(Position, 100, "Position");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Velocity {
+        x: i16,
+        y: i16,
+    }
+    define_component!(Velocity, 101, "Velocity");
+    
+    #[test]
+    fn test_for_each_entity_macro() {
+        Position::ensure_registered();
+        Velocity::ensure_registered();
+        
+        let mut world = World::new();
+        
+        // Spawn some entities
+        let e1 = spawn!(world, Position { x: 0, y: 0 }, Velocity { x: 1, y: 2 });
+        let e2 = spawn!(world, Position { x: 10, y: 20 }, Velocity { x: 3, y: 4 });
+        let e3 = spawn!(world, Position { x: 100, y: 200 }, Velocity { x: 5, y: 6 });
+        
+        // Use the new macro to update positions
+        for_each_entity!(world, [Position, Velocity], |(pos_curr, pos_next), (vel_curr, vel_next)| {
+            pos_next.x = pos_curr.x + vel_curr.x as i32;
+            pos_next.y = pos_curr.y + vel_curr.y as i32;
+            vel_next.x = vel_curr.x;
+            vel_next.y = vel_curr.y;
+        });
+        
+        // Swap buffers to make changes visible
+        world.swap_buffers();
+        
+        // Check results using individual entity access
+        assert_eq!(world.get_component::<Position>(e1), Some(&Position { x: 1, y: 2 }));
+        assert_eq!(world.get_component::<Position>(e2), Some(&Position { x: 13, y: 24 }));
+        assert_eq!(world.get_component::<Position>(e3), Some(&Position { x: 105, y: 206 }));
     }
 }
 

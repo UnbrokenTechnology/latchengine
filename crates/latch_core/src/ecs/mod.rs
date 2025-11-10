@@ -10,6 +10,9 @@ mod entity;
 mod storage;
 mod world;
 
+#[macro_use]
+mod system_macros;
+
 // Public exports
 pub use archetype::{Archetype, ArchetypeId};
 pub use builder::EntityBuilder;
