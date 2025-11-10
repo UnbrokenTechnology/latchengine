@@ -34,10 +34,10 @@
 ///     *vel_next = *vel_curr;
 /// });
 /// 
-/// // Works with any number of components (1, 2, 3, 4, 5, ...)
-/// for_each_entity!(world, [A, B, C, D, E, F, G], |
-///     (a, b, c, d, e, f, g),
-///     (a_next, b_next, c_next, d_next, e_next, f_next, g_next)
+/// // Works with any number of components
+/// for_each_entity!(world, [A, B, C], |
+///     (a, b, c),
+///     (a_next, b_next, c_next)
 /// | {
 ///     // Update logic
 /// });
@@ -59,54 +59,68 @@ macro_rules! for_each_entity {
             // Extract all write slices at once (next buffer)
             let ($($next),+) = $crate::columns_mut!(storage, $($Component),+);
             
-            // Zip curr and next for each component in parallel
-            #[allow(non_snake_case)]
-            {
-                $(
-                    let $curr = $curr.par_iter();
-                    let $next = $next.par_iter_mut();
-                )+
-                
-                // Use multizip from itertools pattern manually
-                // Zip the first two, then zip with the rest iteratively
-                $crate::for_each_entity!(@zip_components [$($curr, $next),+] $body);
-            }
+            // Parallel iteration using rayon's multi-zip
+            $crate::for_each_entity!(@par_multizip [$($curr),+] [$($next),+] $body);
         });
     }};
     
-    // Base case: single component
-    (@zip_components [$curr:ident, $next:ident] $body:expr) => {
-        $curr.zip($next).for_each(|($curr, $next)| $body);
+    // 1 component
+    (@par_multizip [$c1:ident] [$n1:ident] $body:expr) => {
+        $c1.par_iter().zip($n1.par_iter_mut())
+            .for_each(|($c1, $n1)| {
+                let ($c1) = ($c1);
+                let ($n1) = ($n1);
+                $body
+            });
     };
     
-    // Recursive case: multiple components
-    (@zip_components [$curr1:ident, $next1:ident, $($curr_rest:ident, $next_rest:ident),+] $body:expr) => {
-        $curr1.zip($next1).zip(
-            $crate::for_each_entity!(@build_rest_zip $($curr_rest, $next_rest),+)
-        ).for_each(|(($curr1, $next1), rest)| {
-            $crate::for_each_entity!(@unpack_rest rest [$($curr_rest, $next_rest),+] $body);
-        });
+    // 2 components
+    (@par_multizip [$c1:ident, $c2:ident] [$n1:ident, $n2:ident] $body:expr) => {
+        $c1.par_iter().zip($n1.par_iter_mut())
+            .zip($c2.par_iter().zip($n2.par_iter_mut()))
+            .for_each(|(($c1, $n1), ($c2, $n2))| {
+                let ($c1, $c2) = ($c1, $c2);
+                let ($n1, $n2) = ($n1, $n2);
+                $body
+            });
     };
     
-    // Build iterator for the rest of the components
-    (@build_rest_zip $curr:ident, $next:ident) => {
-        $curr.zip($next)
+    // 3 components
+    (@par_multizip [$c1:ident, $c2:ident, $c3:ident] [$n1:ident, $n2:ident, $n3:ident] $body:expr) => {
+        $c1.par_iter().zip($n1.par_iter_mut())
+            .zip($c2.par_iter().zip($n2.par_iter_mut()))
+            .zip($c3.par_iter().zip($n3.par_iter_mut()))
+            .for_each(|((($c1, $n1), ($c2, $n2)), ($c3, $n3))| {
+                let ($c1, $c2, $c3) = ($c1, $c2, $c3);
+                let ($n1, $n2, $n3) = ($n1, $n2, $n3);
+                $body
+            });
     };
     
-    (@build_rest_zip $curr1:ident, $next1:ident, $($curr_rest:ident, $next_rest:ident),+) => {
-        $curr1.zip($next1).zip(
-            $crate::for_each_entity!(@build_rest_zip $($curr_rest, $next_rest),+)
-        )
+    // 4 components
+    (@par_multizip [$c1:ident, $c2:ident, $c3:ident, $c4:ident] [$n1:ident, $n2:ident, $n3:ident, $n4:ident] $body:expr) => {
+        $c1.par_iter().zip($n1.par_iter_mut())
+            .zip($c2.par_iter().zip($n2.par_iter_mut()))
+            .zip($c3.par_iter().zip($n3.par_iter_mut()))
+            .zip($c4.par_iter().zip($n4.par_iter_mut()))
+            .for_each(|(((($c1, $n1), ($c2, $n2)), ($c3, $n3)), ($c4, $n4))| {
+                let ($c1, $c2, $c3, $c4) = ($c1, $c2, $c3, $c4);
+                let ($n1, $n2, $n3, $n4) = ($n1, $n2, $n3, $n4);
+                $body
+            });
     };
     
-    // Unpack nested tuple structure
-    (@unpack_rest $rest:ident [$curr:ident, $next:ident] $body:expr) => {
-        let ($curr, $next) = $rest;
-        $body
-    };
-    
-    (@unpack_rest $rest:ident [$curr1:ident, $next1:ident, $($curr_rest:ident, $next_rest:ident),+] $body:expr) => {
-        let (($curr1, $next1), rest) = $rest;
-        $crate::for_each_entity!(@unpack_rest rest [$($curr_rest, $next_rest),+] $body);
+    // 5 components
+    (@par_multizip [$c1:ident, $c2:ident, $c3:ident, $c4:ident, $c5:ident] [$n1:ident, $n2:ident, $n3:ident, $n4:ident, $n5:ident] $body:expr) => {
+        $c1.par_iter().zip($n1.par_iter_mut())
+            .zip($c2.par_iter().zip($n2.par_iter_mut()))
+            .zip($c3.par_iter().zip($n3.par_iter_mut()))
+            .zip($c4.par_iter().zip($n4.par_iter_mut()))
+            .zip($c5.par_iter().zip($n5.par_iter_mut()))
+            .for_each(|((((($c1, $n1), ($c2, $n2)), ($c3, $n3)), ($c4, $n4)), ($c5, $n5))| {
+                let ($c1, $c2, $c3, $c4, $c5) = ($c1, $c2, $c3, $c4, $c5);
+                let ($n1, $n2, $n3, $n4, $n5) = ($n1, $n2, $n3, $n4, $n5);
+                $body
+            });
     };
 }
