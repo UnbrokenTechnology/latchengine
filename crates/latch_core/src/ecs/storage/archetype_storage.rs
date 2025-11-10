@@ -82,9 +82,10 @@ impl ArchetypeStorage {
             let row = self.len;
             self.len += 1;
             
-            // Grow each column to new length
+            // Ensure all columns have capacity for the new element
+            // Columns will double their capacity as needed
             for col in self.columns.values_mut() {
-                col.grow_to(self.len);
+                col.ensure_capacity(self.len);
             }
             
             self.entity_ids.push(None);

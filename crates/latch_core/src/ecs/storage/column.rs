@@ -21,10 +21,14 @@ use crate::ecs::{Component, ComponentMeta, meta_of};
 /// - Read buffer (current stable state)
 /// - Write buffer (next state being computed)
 /// - Buffers swap each physics tick
+/// 
+/// Tracks both size (number of elements with data) and capacity (allocated space)
+/// to minimize allocations through power-of-2 growth strategy.
 pub(crate) struct Column {
     pub(crate) elem_size: usize,
     pub(crate) elem_align: usize,
     pub(crate) buffers: [Vec<u8>; 2],
+    capacity: usize,  // Number of elements we have space for
 }
 
 impl Column {
@@ -44,25 +48,25 @@ impl Column {
                 Vec::with_capacity(initial_bytes),
                 Vec::with_capacity(initial_bytes),
             ],
+            capacity: Self::INITIAL_CAPACITY,
         }
     }
 
-    /// Get the current read buffer.
-    pub(crate) fn current_bytes(&self, current_buffer: usize) -> &[u8] {
-        &self.buffers[current_buffer]
-    }
-
-    /// Get the next write buffer (mutable).
-    pub(crate) fn next_bytes_mut(&mut self, next_buffer: usize) -> &mut [u8] {
-        &mut self.buffers[next_buffer]
-    }
-
-    /// Grow both buffers to accommodate more elements.
+    /// Ensure capacity for at least `new_size` elements.
     /// 
-    /// Uses a growth strategy to minimize allocations:
-    /// - Reserves space in powers of 2 up to current capacity
-    /// - Single resize operation per buffer
-    pub(crate) fn grow_to(&mut self, new_capacity: usize) {
+    /// If current capacity is insufficient, doubles capacity until it's enough.
+    /// This minimizes allocations while providing predictable growth.
+    pub(crate) fn ensure_capacity(&mut self, new_size: usize) {
+        if new_size <= self.capacity {
+            return;
+        }
+        
+        // Double capacity until we have enough space
+        let mut new_capacity = self.capacity;
+        while new_capacity < new_size {
+            new_capacity *= 2;
+        }
+        
         let target_bytes = new_capacity * self.elem_size;
         
         for buffer in &mut self.buffers {
@@ -76,6 +80,18 @@ impl Column {
                 self.elem_align
             );
         }
+        
+        self.capacity = new_capacity;
+    }
+
+    /// Get the current read buffer.
+    pub(crate) fn current_bytes(&self, current_buffer: usize) -> &[u8] {
+        &self.buffers[current_buffer]
+    }
+
+    /// Get the next write buffer (mutable).
+    pub(crate) fn next_bytes_mut(&mut self, next_buffer: usize) -> &mut [u8] {
+        &mut self.buffers[next_buffer]
     }
 
     /// Write component data to a specific row in a specific buffer.
