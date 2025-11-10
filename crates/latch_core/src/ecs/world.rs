@@ -196,7 +196,8 @@ impl World {
     ///         });
     /// });
     /// ```
-    pub(crate) fn for_each_archetype_with_components<F>(&mut self, component_ids: &[ComponentId], mut f: F)
+    #[doc(hidden)]
+    pub fn for_each_archetype_with_components<F>(&mut self, component_ids: &[ComponentId], mut f: F)
     where
         F: FnMut(&mut ArchetypeStorage),
     {
