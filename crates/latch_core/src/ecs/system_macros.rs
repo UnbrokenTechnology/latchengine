@@ -46,7 +46,6 @@
 macro_rules! for_each_entity {
     ($world:expr, [$($Component:ty),+ $(,)?], |($($curr:ident),+ $(,)?), ($($next:ident),+ $(,)?)| $body:expr) => {{
         use $crate::ecs::Component;
-        use rayon::prelude::*;
         
         // Collect component IDs
         let component_ids = [$(<$Component as Component>::ID),+];
@@ -54,7 +53,7 @@ macro_rules! for_each_entity {
         // Iterate over all archetypes with these components
         $world.for_each_archetype_with_components(&component_ids, |storage| {
             // Extract all read slices at once (current buffer)
-            let ($ ($curr),+) = $crate::columns!(storage, $($Component),+);
+            let ($($curr),+) = $crate::columns!(storage, $($Component),+);
             
             // Extract all write slices at once (next buffer)
             let ($(mut $next),+) = $crate::columns_mut!(storage, $($Component),+);
@@ -69,22 +68,13 @@ macro_rules! for_each_entity {
                 len
             };
             
-            // Get raw pointers to avoid borrowing issues in the parallel closure
-            $(let $curr = $curr.as_ptr();)+
-            $(let $next = $next.as_mut_ptr();)+
-            
-            // Parallel iteration using index-based approach
-            // This avoids the nested tuple problem when zipping many iterators
-            (0..len).into_par_iter().for_each(move |i| {
-                // SAFETY: We've verified all slices have the same length `len`
-                // and rayon ensures different threads access different indices.
-                // The slices are obtained from different component columns so there's no aliasing.
-                unsafe {
-                    let ($($curr),+) = ( $( &*$curr.add(i) ),+ );
-                    let ($($next),+) = ( $( &mut *$next.add(i) ),+ );
-                    $body
-                }
-            });
+            // Sequential iteration - simple and supports arbitrary component counts
+            // TODO: Optimize to parallel iteration while maintaining arbitrary component support
+            for i in 0..len {
+                let ($($curr),+) = ( $( &$curr[i] ),+ );
+                let ($($next),+) = ( $( &mut $next[i] ),+ );
+                $body
+            }
         });
     }};
 }
