@@ -172,16 +172,19 @@ impl World {
         self.storages.values()
     }
 
-    /// Execute a function on all entities with the specified components.
+    /// Execute a function on all archetypes with the specified components.
     /// 
-    /// This is the primary API for multi-component iteration.
+    /// **Internal API**: This is a low-level primitive for archetype iteration.
+    /// Most users should use the higher-level `for_each_entity!` macro instead,
+    /// which hides archetype details and provides a cleaner API.
+    /// 
     /// Use `columns!` and `columns_mut!` macros to extract component slices.
     /// 
     /// # Example
     /// ```ignore
     /// use latch_core::{columns, columns_mut};
     /// 
-    /// world.for_each(&[Position::ID, Velocity::ID], |storage| {
+    /// world.for_each_archetype_with_components(&[Position::ID, Velocity::ID], |storage| {
     ///     let positions = columns!(storage, Position);
     ///     let velocities = columns_mut!(storage, Velocity);
     ///     
@@ -193,7 +196,8 @@ impl World {
     ///         });
     /// });
     /// ```
-    pub fn for_each<F>(&mut self, component_ids: &[ComponentId], mut f: F)
+    #[doc(hidden)]
+    pub fn for_each_archetype_with_components<F>(&mut self, component_ids: &[ComponentId], mut f: F)
     where
         F: FnMut(&mut ArchetypeStorage),
     {
@@ -247,6 +251,119 @@ impl World {
 impl Default for World {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::Component;
+    use crate::{define_component, spawn, for_each_entity};
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Position {
+        x: i32,
+        y: i32,
+    }
+    define_component!(Position, 100, "Position");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Velocity {
+        x: i16,
+        y: i16,
+    }
+    define_component!(Velocity, 101, "Velocity");
+    
+    // Additional test components for testing arbitrary component counts
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Health { value: i32 }
+    define_component!(Health, 102, "Health");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Armor { value: i32 }
+    define_component!(Armor, 103, "Armor");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Damage { value: i32 }
+    define_component!(Damage, 104, "Damage");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Speed { value: i32 }
+    define_component!(Speed, 105, "Speed");
+    
+    #[test]
+    fn test_for_each_entity_macro() {
+        Position::ensure_registered();
+        Velocity::ensure_registered();
+        
+        let mut world = World::new();
+        
+        // Spawn some entities
+        let e1 = spawn!(world, Position { x: 0, y: 0 }, Velocity { x: 1, y: 2 });
+        let e2 = spawn!(world, Position { x: 10, y: 20 }, Velocity { x: 3, y: 4 });
+        let e3 = spawn!(world, Position { x: 100, y: 200 }, Velocity { x: 5, y: 6 });
+        
+        // Use the new macro to update positions
+        for_each_entity!(world, [Position, Velocity], |(pos_curr, vel_curr), (pos_next, vel_next)| {
+            pos_next.x = pos_curr.x + vel_curr.x as i32;
+            pos_next.y = pos_curr.y + vel_curr.y as i32;
+            vel_next.x = vel_curr.x;
+            vel_next.y = vel_curr.y;
+        });
+        
+        // Swap buffers to make changes visible
+        world.swap_buffers();
+        
+        // Check results using individual entity access
+        assert_eq!(world.get_component::<Position>(e1), Some(&Position { x: 1, y: 2 }));
+        assert_eq!(world.get_component::<Position>(e2), Some(&Position { x: 13, y: 24 }));
+        assert_eq!(world.get_component::<Position>(e3), Some(&Position { x: 105, y: 206 }));
+    }
+    
+    #[test]
+    fn test_for_each_entity_macro_many_components() {
+        // Test that the macro supports more than 5 components (arbitrary count)
+        Position::ensure_registered();
+        Velocity::ensure_registered();
+        Health::ensure_registered();
+        Armor::ensure_registered();
+        Damage::ensure_registered();
+        Speed::ensure_registered();
+        
+        let mut world = World::new();
+        
+        // Spawn an entity with 6 components
+        let e1 = spawn!(
+            world,
+            Position { x: 10, y: 20 },
+            Velocity { x: 1, y: 2 },
+            Health { value: 100 },
+            Armor { value: 50 },
+            Damage { value: 25 },
+            Speed { value: 5 }
+        );
+        
+        // Use the macro with 6 components to verify arbitrary component support
+        for_each_entity!(
+            world,
+            [Position, Velocity, Health, Armor, Damage, Speed],
+            |(pos, vel, health, armor, damage, speed), (pos_n, vel_n, health_n, armor_n, damage_n, speed_n)| {
+                // Simple update logic
+                pos_n.x = pos.x + vel.x as i32;
+                pos_n.y = pos.y + vel.y as i32;
+                *vel_n = *vel;
+                health_n.value = health.value + armor.value - damage.value;
+                *armor_n = *armor;
+                *damage_n = *damage;
+                *speed_n = *speed;
+            }
+        );
+        
+        world.swap_buffers();
+        
+        // Verify the updates
+        assert_eq!(world.get_component::<Position>(e1), Some(&Position { x: 11, y: 22 }));
+        assert_eq!(world.get_component::<Health>(e1), Some(&Health { value: 125 })); // 100 + 50 - 25
     }
 }
 

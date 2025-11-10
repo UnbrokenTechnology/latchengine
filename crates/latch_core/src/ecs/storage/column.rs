@@ -45,8 +45,8 @@ impl Column {
             elem_size: meta.size,
             elem_align: meta.align,
             buffers: [
-                Vec::with_capacity(initial_bytes),
-                Vec::with_capacity(initial_bytes),
+                vec![0u8; initial_bytes],
+                vec![0u8; initial_bytes],
             ],
             capacity: Self::INITIAL_CAPACITY,
         }
@@ -109,11 +109,13 @@ impl Column {
         buffer[start..start + self.elem_size].copy_from_slice(src);
     }
 
-    /// Get a typed immutable slice from this column.
+    /// Get a typed immutable slice from this column with a specific length.
     /// 
     /// # Safety
-    /// Caller must ensure T matches the actual component type stored.
-    pub(crate) unsafe fn as_slice<T: Component>(&self, buffer_idx: usize) -> &[T] {
+    /// Caller must ensure:
+    /// - T matches the actual component type stored
+    /// - len does not exceed the buffer capacity
+    pub(crate) unsafe fn as_slice_with_len<T: Component>(&self, buffer_idx: usize, len: usize) -> &[T] {
         let meta = meta_of(T::ID).expect("Component not registered");
         assert_eq!(meta.size, self.elem_size);
         
@@ -121,15 +123,16 @@ impl Column {
         debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
         
         let ptr = bytes.as_ptr() as *const T;
-        let len = bytes.len() / meta.size;
         std::slice::from_raw_parts(ptr, len)
     }
 
-    /// Get a typed mutable slice from this column.
+    /// Get a typed mutable slice from this column with a specific length.
     /// 
     /// # Safety
-    /// Caller must ensure T matches the actual component type stored.
-    pub(crate) unsafe fn as_slice_mut<T: Component>(&mut self, buffer_idx: usize) -> &mut [T] {
+    /// Caller must ensure:
+    /// - T matches the actual component type stored
+    /// - len does not exceed the buffer capacity
+    pub(crate) unsafe fn as_slice_mut_with_len<T: Component>(&mut self, buffer_idx: usize, len: usize) -> &mut [T] {
         let meta = meta_of(T::ID).expect("Component not registered");
         assert_eq!(meta.size, self.elem_size);
         
@@ -137,7 +140,6 @@ impl Column {
         debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
         
         let ptr = bytes.as_mut_ptr() as *mut T;
-        let len = bytes.len() / meta.size;
         std::slice::from_raw_parts_mut(ptr, len)
     }
 }

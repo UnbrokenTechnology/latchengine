@@ -83,44 +83,32 @@ define_component!(Color, 3, "Color");
 // ============================================================================
 
 fn physics_system(world: &mut World, _dt: f32) {
-    use rayon::prelude::*;
-    use latch_core::{columns, columns_mut};
+    use latch_core::for_each_entity;
     
     // Integer-based deterministic physics with double-buffering!
     // - Read from "current" buffer (stable state from last tick)
     // - Write to "next" buffer (new state for next tick)
     // - No floating-point, no drift, perfect replay.
     
-    world.for_each(&[Position::ID, Velocity::ID], |storage| {
-        // Read from "current" buffer, write to "next" buffer
-        let (pos_read, vel_read) = columns!(storage, Position, Velocity);
-        let (pos_write, vel_write) = columns_mut!(storage, Position, Velocity);
+    for_each_entity!(world, [Position, Velocity], |(pos_in, vel_in), (pos_out, vel_out)| {
+        // Update position (pure integer arithmetic!)
+        pos_out.x = pos_in.x + vel_in.x as i32;
+        pos_out.y = pos_in.y + vel_in.y as i32;
         
-        // Parallel iteration: read old state, write new state
-        pos_write.par_iter_mut()
-            .zip(vel_write.par_iter_mut())
-            .zip(pos_read.par_iter())
-            .zip(vel_read.par_iter())
-            .for_each(|(((pos_out, vel_out), pos_in), vel_in)| {
-                // Update position (pure integer arithmetic!)
-                pos_out.x = pos_in.x + vel_in.x as i32;
-                pos_out.y = pos_in.y + vel_in.y as i32;
-                
-                // Copy velocity for next iteration
-                vel_out.x = vel_in.x;
-                vel_out.y = vel_in.y;
-                
-                // Bounce off edges (NDC bounds: ±1,000,000 units = ±10 meters)
-                let bound = UNITS_PER_NDC;
-                if pos_out.x < -bound || pos_out.x > bound {
-                    pos_out.x = pos_out.x.clamp(-bound, bound);
-                    vel_out.x = vel_out.x.saturating_neg(); // Handle i16::MIN overflow
-                }
-                if pos_out.y < -bound || pos_out.y > bound {
-                    pos_out.y = pos_out.y.clamp(-bound, bound);
-                    vel_out.y = vel_out.y.saturating_neg(); // Handle i16::MIN overflow
-                }
-            });
+        // Copy velocity for next iteration
+        vel_out.x = vel_in.x;
+        vel_out.y = vel_in.y;
+        
+        // Bounce off edges (NDC bounds: ±1,000,000 units = ±10 meters)
+        let bound = UNITS_PER_NDC;
+        if pos_out.x < -bound || pos_out.x > bound {
+            pos_out.x = pos_out.x.clamp(-bound, bound);
+            vel_out.x = vel_out.x.saturating_neg(); // Handle i16::MIN overflow
+        }
+        if pos_out.y < -bound || pos_out.y > bound {
+            pos_out.y = pos_out.y.clamp(-bound, bound);
+            vel_out.y = vel_out.y.saturating_neg(); // Handle i16::MIN overflow
+        }
     });
 }
 

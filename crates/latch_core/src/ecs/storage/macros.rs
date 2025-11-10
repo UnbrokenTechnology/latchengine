@@ -54,6 +54,9 @@ macro_rules! columns {
         // Get the current buffer index (what we read from)
         let current_buffer = $storage.current_buffer_index();
         
+        // Get the number of live entities
+        let len = $storage.len();
+        
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
             $storage.get_column_ptr_const(<$T as $crate::ecs::Component>::ID)
@@ -66,7 +69,7 @@ macro_rules! columns {
             let mut idx = 0;
             ($(
                 {
-                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice_const::<$T>(ptrs[idx], current_buffer);
+                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice_const::<$T>(ptrs[idx], current_buffer, len);
                     idx += 1;
                     slice
                 }
@@ -102,6 +105,9 @@ macro_rules! columns_mut {
         // Get the next buffer index (what we write to)
         let next_buffer = $storage.next_buffer_index();
         
+        // Get the number of live entities
+        let len = $storage.len();
+        
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
             $storage.get_column_ptr(<$T as $crate::ecs::Component>::ID)
@@ -121,7 +127,7 @@ macro_rules! columns_mut {
             let mut idx = 0;
             ($(
                 {
-                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice::<$T>(ptrs[idx], next_buffer);
+                    let slice = $crate::ecs::ArchetypeStorage::column_ptr_to_slice::<$T>(ptrs[idx], next_buffer, len);
                     idx += 1;
                     slice
                 }

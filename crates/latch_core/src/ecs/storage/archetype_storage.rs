@@ -190,6 +190,7 @@ impl ArchetypeStorage {
     /// Get an immutable typed slice of all components of type T.
     /// 
     /// Reads from the "current" buffer (stable state).
+    /// Returns a slice limited to the number of live entities (self.len).
     pub fn column_as_slice<T: Component>(&self) -> Option<&[T]> {
         let meta = meta_of(T::ID)?;
         let col = self.columns.get(&T::ID)?;
@@ -213,7 +214,8 @@ impl ArchetypeStorage {
         );
         
         let ptr = bytes.as_ptr();
-        let len = bytes.len() / meta.size;
+        // Use self.len (number of live entities), not bytes.len() (buffer capacity)
+        let len = self.len;
         
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts(ptr as *const T, len) })
@@ -222,6 +224,7 @@ impl ArchetypeStorage {
     /// Get a mutable typed slice of all components of type T.
     /// 
     /// Writes to the "next" buffer (the one not currently being read from).
+    /// Returns a slice limited to the number of live entities (self.len).
     pub fn column_as_slice_mut<T: Component>(&mut self) -> Option<&mut [T]> {
         let meta = meta_of(T::ID)?;
         let col = self.columns.get_mut(&T::ID)?;
@@ -246,7 +249,8 @@ impl ArchetypeStorage {
         );
         
         let ptr = bytes.as_mut_ptr();
-        let len = bytes.len() / meta.size;
+        // Use self.len (number of live entities), not bytes.len() (buffer capacity)
+        let len = self.len;
         
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts_mut(ptr as *mut T, len) })
@@ -278,10 +282,11 @@ impl ArchetypeStorage {
     /// - ptr must be a valid pointer returned from get_column_ptr_const
     /// - T must match the actual component type stored in that column
     /// - buffer_idx must be valid (0 or 1)
+    /// - len must not exceed the column's capacity
     #[doc(hidden)]
-    pub unsafe fn column_ptr_to_slice_const<T: Component>(ptr: *const u8, buffer_idx: usize) -> &'static [T] {
+    pub unsafe fn column_ptr_to_slice_const<T: Component>(ptr: *const u8, buffer_idx: usize, len: usize) -> &'static [T] {
         let col = &*(ptr as *const Column);
-        col.as_slice::<T>(buffer_idx)
+        col.as_slice_with_len::<T>(buffer_idx, len)
     }
 
     /// Convert a raw column pointer to a typed mutable slice.
@@ -291,9 +296,10 @@ impl ArchetypeStorage {
     /// - T must match the actual component type stored in that column
     /// - No other references to this column may exist
     /// - buffer_idx must be valid (0 or 1)
+    /// - len must not exceed the column's capacity
     #[doc(hidden)]
-    pub unsafe fn column_ptr_to_slice<T: Component>(ptr: *mut u8, buffer_idx: usize) -> &'static mut [T] {
+    pub unsafe fn column_ptr_to_slice<T: Component>(ptr: *mut u8, buffer_idx: usize, len: usize) -> &'static mut [T] {
         let col = &mut *(ptr as *mut Column);
-        col.as_slice_mut::<T>(buffer_idx)
+        col.as_slice_mut_with_len::<T>(buffer_idx, len)
     }
 }
