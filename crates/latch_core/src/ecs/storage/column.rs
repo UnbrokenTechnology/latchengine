@@ -45,10 +45,10 @@ impl Column {
             elem_size: meta.size,
             elem_align: meta.align,
             buffers: [
-                Vec::with_capacity(initial_bytes),
-                Vec::with_capacity(initial_bytes),
+                vec![0u8; initial_bytes],
+                vec![0u8; initial_bytes],
             ],
-            capacity: 0,  // Start with 0 capacity, will grow on first alloc
+            capacity: Self::INITIAL_CAPACITY,
         }
     }
 
@@ -62,13 +62,7 @@ impl Column {
         }
         
         // Double capacity until we have enough space
-        // Start with at least INITIAL_CAPACITY if current is 0
-        let mut new_capacity = if self.capacity == 0 {
-            Self::INITIAL_CAPACITY
-        } else {
-            self.capacity
-        };
-        
+        let mut new_capacity = self.capacity;
         while new_capacity < new_size {
             new_capacity *= 2;
         }

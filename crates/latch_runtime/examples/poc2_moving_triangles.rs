@@ -90,7 +90,7 @@ fn physics_system(world: &mut World, _dt: f32) {
     // - Write to "next" buffer (new state for next tick)
     // - No floating-point, no drift, perfect replay.
     
-    for_each_entity!(world, [Position, Velocity], |(pos_in, pos_out), (vel_in, vel_out)| {
+    for_each_entity!(world, [Position, Velocity], |(pos_in, vel_in), (pos_out, vel_out)| {
         // Update position (pure integer arithmetic!)
         pos_out.x = pos_in.x + vel_in.x as i32;
         pos_out.y = pos_in.y + vel_in.y as i32;
@@ -109,7 +109,7 @@ fn physics_system(world: &mut World, _dt: f32) {
             pos_out.y = pos_out.y.clamp(-bound, bound);
             vel_out.y = vel_out.y.saturating_neg(); // Handle i16::MIN overflow
         }
-    }, parallel);
+    });
 }
 
 // ============================================================================

@@ -287,7 +287,7 @@ mod tests {
         let e3 = spawn!(world, Position { x: 100, y: 200 }, Velocity { x: 5, y: 6 });
         
         // Use the new macro to update positions
-        for_each_entity!(world, [Position, Velocity], |(pos_curr, pos_next), (vel_curr, vel_next)| {
+        for_each_entity!(world, [Position, Velocity], |(pos_curr, vel_curr), (pos_next, vel_next)| {
             pos_next.x = pos_curr.x + vel_curr.x as i32;
             pos_next.y = pos_curr.y + vel_curr.y as i32;
             vel_next.x = vel_curr.x;
