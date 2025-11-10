@@ -274,6 +274,23 @@ mod tests {
     }
     define_component!(Velocity, 101, "Velocity");
     
+    // Additional test components for testing arbitrary component counts
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Health { value: i32 }
+    define_component!(Health, 102, "Health");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Armor { value: i32 }
+    define_component!(Armor, 103, "Armor");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Damage { value: i32 }
+    define_component!(Damage, 104, "Damage");
+    
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Speed { value: i32 }
+    define_component!(Speed, 105, "Speed");
+    
     #[test]
     fn test_for_each_entity_macro() {
         Position::ensure_registered();
@@ -301,6 +318,52 @@ mod tests {
         assert_eq!(world.get_component::<Position>(e1), Some(&Position { x: 1, y: 2 }));
         assert_eq!(world.get_component::<Position>(e2), Some(&Position { x: 13, y: 24 }));
         assert_eq!(world.get_component::<Position>(e3), Some(&Position { x: 105, y: 206 }));
+    }
+    
+    #[test]
+    fn test_for_each_entity_macro_many_components() {
+        // Test that the macro supports more than 5 components (arbitrary count)
+        Position::ensure_registered();
+        Velocity::ensure_registered();
+        Health::ensure_registered();
+        Armor::ensure_registered();
+        Damage::ensure_registered();
+        Speed::ensure_registered();
+        
+        let mut world = World::new();
+        
+        // Spawn an entity with 6 components
+        let e1 = spawn!(
+            world,
+            Position { x: 10, y: 20 },
+            Velocity { x: 1, y: 2 },
+            Health { value: 100 },
+            Armor { value: 50 },
+            Damage { value: 25 },
+            Speed { value: 5 }
+        );
+        
+        // Use the macro with 6 components to verify arbitrary component support
+        for_each_entity!(
+            world,
+            [Position, Velocity, Health, Armor, Damage, Speed],
+            |(pos, vel, health, armor, damage, speed), (pos_n, vel_n, health_n, armor_n, damage_n, speed_n)| {
+                // Simple update logic
+                pos_n.x = pos.x + vel.x as i32;
+                pos_n.y = pos.y + vel.y as i32;
+                *vel_n = *vel;
+                health_n.value = health.value + armor.value - damage.value;
+                *armor_n = *armor;
+                *damage_n = *damage;
+                *speed_n = *speed;
+            }
+        );
+        
+        world.swap_buffers();
+        
+        // Verify the updates
+        assert_eq!(world.get_component::<Position>(e1), Some(&Position { x: 11, y: 22 }));
+        assert_eq!(world.get_component::<Health>(e1), Some(&Health { value: 125 })); // 100 + 50 - 25
     }
 }
 

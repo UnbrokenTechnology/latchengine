@@ -34,10 +34,10 @@
 ///     *vel_next = *vel_curr;
 /// });
 /// 
-/// // Works with any number of components
-/// for_each_entity!(world, [A, B, C], |
-///     (a, b, c),
-///     (a_next, b_next, c_next)
+/// // Works with any number of components (1, 2, 3, 7, 10, ...)
+/// for_each_entity!(world, [A, B, C, D, E, F, G], |
+///     (a, b, c, d, e, f, g),
+///     (a_next, b_next, c_next, d_next, e_next, f_next, g_next)
 /// | {
 ///     // Update logic
 /// });
@@ -54,73 +54,37 @@ macro_rules! for_each_entity {
         // Iterate over all archetypes with these components
         $world.for_each_archetype_with_components(&component_ids, |storage| {
             // Extract all read slices at once (current buffer)
-            let ($($curr),+) = $crate::columns!(storage, $($Component),+);
+            let ($ ($curr),+) = $crate::columns!(storage, $($Component),+);
             
             // Extract all write slices at once (next buffer)
-            let ($($next),+) = $crate::columns_mut!(storage, $($Component),+);
+            let ($(mut $next),+) = $crate::columns_mut!(storage, $($Component),+);
             
-            // Parallel iteration using rayon's multi-zip
-            $crate::for_each_entity!(@par_multizip [$($curr),+] [$($next),+] $body);
+            // Verify all slices have the same length
+            let len = {
+                let curr_lens = [ $( $curr.len() ),+ ];
+                let next_lens = [ $( $next.len() ),+ ];
+                let len = curr_lens[0];
+                assert!(curr_lens.iter().all(|&x| x == len), "curr columns differ in length");
+                assert!(next_lens.iter().all(|&x| x == len), "next columns differ in length");
+                len
+            };
+            
+            // Get raw pointers to avoid borrowing issues in the parallel closure
+            $(let $curr = $curr.as_ptr();)+
+            $(let $next = $next.as_mut_ptr();)+
+            
+            // Parallel iteration using index-based approach
+            // This avoids the nested tuple problem when zipping many iterators
+            (0..len).into_par_iter().for_each(move |i| {
+                // SAFETY: We've verified all slices have the same length `len`
+                // and rayon ensures different threads access different indices.
+                // The slices are obtained from different component columns so there's no aliasing.
+                unsafe {
+                    let ($($curr),+) = ( $( &*$curr.add(i) ),+ );
+                    let ($($next),+) = ( $( &mut *$next.add(i) ),+ );
+                    $body
+                }
+            });
         });
     }};
-    
-    // 1 component
-    (@par_multizip [$c1:ident] [$n1:ident] $body:expr) => {
-        $c1.par_iter().zip($n1.par_iter_mut())
-            .for_each(|($c1, $n1)| {
-                let ($c1) = ($c1);
-                let ($n1) = ($n1);
-                $body
-            });
-    };
-    
-    // 2 components
-    (@par_multizip [$c1:ident, $c2:ident] [$n1:ident, $n2:ident] $body:expr) => {
-        $c1.par_iter().zip($n1.par_iter_mut())
-            .zip($c2.par_iter().zip($n2.par_iter_mut()))
-            .for_each(|(($c1, $n1), ($c2, $n2))| {
-                let ($c1, $c2) = ($c1, $c2);
-                let ($n1, $n2) = ($n1, $n2);
-                $body
-            });
-    };
-    
-    // 3 components
-    (@par_multizip [$c1:ident, $c2:ident, $c3:ident] [$n1:ident, $n2:ident, $n3:ident] $body:expr) => {
-        $c1.par_iter().zip($n1.par_iter_mut())
-            .zip($c2.par_iter().zip($n2.par_iter_mut()))
-            .zip($c3.par_iter().zip($n3.par_iter_mut()))
-            .for_each(|((($c1, $n1), ($c2, $n2)), ($c3, $n3))| {
-                let ($c1, $c2, $c3) = ($c1, $c2, $c3);
-                let ($n1, $n2, $n3) = ($n1, $n2, $n3);
-                $body
-            });
-    };
-    
-    // 4 components
-    (@par_multizip [$c1:ident, $c2:ident, $c3:ident, $c4:ident] [$n1:ident, $n2:ident, $n3:ident, $n4:ident] $body:expr) => {
-        $c1.par_iter().zip($n1.par_iter_mut())
-            .zip($c2.par_iter().zip($n2.par_iter_mut()))
-            .zip($c3.par_iter().zip($n3.par_iter_mut()))
-            .zip($c4.par_iter().zip($n4.par_iter_mut()))
-            .for_each(|(((($c1, $n1), ($c2, $n2)), ($c3, $n3)), ($c4, $n4))| {
-                let ($c1, $c2, $c3, $c4) = ($c1, $c2, $c3, $c4);
-                let ($n1, $n2, $n3, $n4) = ($n1, $n2, $n3, $n4);
-                $body
-            });
-    };
-    
-    // 5 components
-    (@par_multizip [$c1:ident, $c2:ident, $c3:ident, $c4:ident, $c5:ident] [$n1:ident, $n2:ident, $n3:ident, $n4:ident, $n5:ident] $body:expr) => {
-        $c1.par_iter().zip($n1.par_iter_mut())
-            .zip($c2.par_iter().zip($n2.par_iter_mut()))
-            .zip($c3.par_iter().zip($n3.par_iter_mut()))
-            .zip($c4.par_iter().zip($n4.par_iter_mut()))
-            .zip($c5.par_iter().zip($n5.par_iter_mut()))
-            .for_each(|((((($c1, $n1), ($c2, $n2)), ($c3, $n3)), ($c4, $n4)), ($c5, $n5))| {
-                let ($c1, $c2, $c3, $c4, $c5) = ($c1, $c2, $c3, $c4, $c5);
-                let ($n1, $n2, $n3, $n4, $n5) = ($n1, $n2, $n3, $n4, $n5);
-                $body
-            });
-    };
 }
