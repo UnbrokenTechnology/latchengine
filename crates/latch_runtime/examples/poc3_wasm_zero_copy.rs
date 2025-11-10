@@ -189,11 +189,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("3. Calling WASM system (zero-copy update)...");
     
-    // Get component data from ECS
-    let entities: Vec<(Position, Velocity)> = world
-        .query2::<Position, Velocity>()
-        .map(|(_, p, v)| (*p, *v))
-        .collect();
+    // Get component data from ECS using the new API
+    let mut entities: Vec<(Position, Velocity)> = Vec::new();
+    
+    // Find all archetypes with both Position and Velocity
+    let archetypes = world.archetypes_with_all(&[Position::ID, Velocity::ID]);
+    for arch_id in archetypes {
+        if let Some(storage) = world.archetype_storage(arch_id) {
+            if let (Some(positions), Some(velocities)) = (
+                storage.column_as_slice::<Position>(),
+                storage.column_as_slice::<Velocity>()
+            ) {
+                for i in 0..positions.len() {
+                    entities.push((positions[i], velocities[i]));
+                }
+            }
+        }
+    }
     
     let count = entities.len();
     
