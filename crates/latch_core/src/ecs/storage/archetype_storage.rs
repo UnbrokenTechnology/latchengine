@@ -17,37 +17,47 @@ use super::column::Column;
 /// - Write to "next" buffer (new state)
 /// - Swap buffers each physics tick
 pub struct ArchetypeStorage {
-    pub archetype: Archetype,
-    pub(crate) columns: HashMap<ComponentId, Column>,
-    len: usize,
-    free: Vec<usize>,
-    entity_ids: Vec<Option<u64>>,
-    pub(crate) entity_generations: Vec<u32>,
-    /// Which buffer is currently being read from (0 or 1)
-    current_buffer: usize,
+    pub archetype: Archetype, // The archetype this storage represents
+
+    pub(crate) columns: HashMap<ComponentId, Column>, // Maps component ID to its column
+
+    entity_ids: Vec<u64>, // Maps row index to entity ID
+
+    current_buffer: u8, // Which buffer is currently being read from (0 or 1)
+
+    len: usize, // Number of entities currently stored
+    capacity: usize,  // Number of elements we have space for
 }
 
 impl ArchetypeStorage {
+    /// Initial capacity for new vectors (1024 elements).
+    const INITIAL_CAPACITY: usize = 1024;
+
     /// Create new storage for an archetype.
     pub fn new(archetype: Archetype) -> Self {
+        let mut columns = HashMap::new();
+        for &cid in &archetype.components {
+            let meta = crate::ecs::meta_of(cid).expect("component not registered");
+            columns.insert(meta.id, Column::new(meta, Self::INITIAL_CAPACITY));
+        }
+
         Self {
             archetype,
-            columns: HashMap::new(),
-            len: 0,
-            free: Vec::new(),
-            entity_ids: Vec::new(),
-            entity_generations: Vec::new(),
+            columns,
+            entity_ids: Vec::with_capacity(Self::INITIAL_CAPACITY),
             current_buffer: 0,
+            len: 0,
+            capacity: Self::INITIAL_CAPACITY,
         }
     }
 
     /// Get the index of the current buffer (the one being read from).
-    pub fn current_buffer_index(&self) -> usize {
+    pub fn current_buffer_index(&self) -> u8 {
         self.current_buffer
     }
 
     /// Get the index of the next buffer (the one being written to).
-    pub fn next_buffer_index(&self) -> usize {
+    pub fn next_buffer_index(&self) -> u8 {
         1 - self.current_buffer
     }
 
@@ -59,43 +69,22 @@ impl ArchetypeStorage {
     /// **Performance**: This is just an index flip - O(1) operation, no memcpy!
     /// The buffers themselves stay in place; we just swap which one is "current".
     pub fn swap_buffers(&mut self) {
-        self.current_buffer = 1 - self.current_buffer;
-        // That's it! No copying needed.
-        // What was "next" is now "current" (contains latest state)
-        // What was "current" is now "next" (will be overwritten next tick)
+        self.current_buffer = self.current_buffer ^ 1;
     }
 
-    /// Ensure a column exists for the given component.
-    pub fn ensure_column(&mut self, meta: ComponentMeta) {
-        self.columns
-            .entry(meta.id)
-            .or_insert_with(|| Column::new(meta));
-    }
-
-    /// Allocate a new row (reuses from pool if available).
-    pub fn alloc_row(&mut self) -> (usize, u32) {
-        if let Some(idx) = self.free.pop() {
-            let generation = self.entity_generations[idx];
-            self.entity_ids[idx] = None;
-            (idx, generation)
-        } else {
-            let row = self.len;
-            self.len += 1;
-            
-            // Ensure all columns have capacity for the new element
-            // Columns will double their capacity as needed
-            for col in self.columns.values_mut() {
-                col.ensure_capacity(self.len);
-            }
-            
-            self.entity_ids.push(None);
-            self.entity_generations.push(0);
-            (row, 0)
+    /// Allocate a new row
+    pub fn add_entity(&mut self, id: u64) -> (usize) {
+        let row = self.len;
+        self.len += 1;
+        for col in self.columns.values_mut() {
+            col.ensure_capacity(self.len);
         }
+        self.entity_ids.push(id);
+        row
     }
 
     /// Free a row (returns to pool and increments generation).
-    pub fn free_row(&mut self, idx: usize) {
+    pub fn remove_entity(&mut self, idx: usize) {
         self.entity_ids[idx] = None;
         self.entity_generations[idx] = self.entity_generations[idx].wrapping_add(1);
         self.free.push(idx);
@@ -213,7 +202,7 @@ impl ArchetypeStorage {
         );
         
         let ptr = bytes.as_ptr();
-        let len = bytes.len() / meta.size;
+        let len = self.len;
         
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts(ptr as *const T, len) })
@@ -246,7 +235,7 @@ impl ArchetypeStorage {
         );
         
         let ptr = bytes.as_mut_ptr();
-        let len = bytes.len() / meta.size;
+        let len = self.len;
         
         // Safety: Column guarantees proper alignment and tightly-packed POD layout
         Some(unsafe { std::slice::from_raw_parts_mut(ptr as *mut T, len) })

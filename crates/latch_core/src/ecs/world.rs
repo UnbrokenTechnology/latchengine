@@ -49,17 +49,11 @@ impl World {
             }
         };
 
-        // Ensure all columns exist
-        for &cid in &archetype.components {
-            let meta = crate::ecs::meta_of(cid).expect("component not registered");
-            storage.ensure_column(meta);
-        }
-
         // Allocate entity ID and row
         let id = self.next_entity_id;
         self.next_entity_id += 1;
 
-        let (row, generation) = storage.alloc_row();
+        let row = storage.add_entity(id);
 
         // Write components
         for (cid, bytes) in builder.into_components() {
@@ -68,7 +62,7 @@ impl World {
         
         storage.set_entity(row, id);
 
-        Entity::new(id, generation, archetype.id, row)
+        Entity::new(id, archetype.id, row)
     }
 
     /// Despawn an entity.

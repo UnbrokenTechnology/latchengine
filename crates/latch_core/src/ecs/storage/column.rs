@@ -28,19 +28,15 @@ pub(crate) struct Column {
     pub(crate) elem_size: usize,
     pub(crate) elem_align: usize,
     pub(crate) buffers: [Vec<u8>; 2],
-    capacity: usize,  // Number of elements we have space for
 }
 
 impl Column {
-    /// Initial capacity for new columns (1024 elements).
-    const INITIAL_CAPACITY: usize = 1024;
-    
     /// Create a new column with proper alignment and double-buffering.
     /// 
     /// Pre-allocates space for INITIAL_CAPACITY elements to reduce
     /// allocation overhead when spawning many entities.
-    pub(crate) fn new(meta: ComponentMeta) -> Self {
-        let initial_bytes = meta.size * Self::INITIAL_CAPACITY;
+    pub(crate) fn new(meta: ComponentMeta, initial_capacity: usize) -> Self {
+        let initial_bytes = meta.size * initial_capacity;
         Self {
             elem_size: meta.size,
             elem_align: meta.align,
@@ -48,7 +44,6 @@ impl Column {
                 Vec::with_capacity(initial_bytes),
                 Vec::with_capacity(initial_bytes),
             ],
-            capacity: Self::INITIAL_CAPACITY,
         }
     }
 

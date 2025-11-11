@@ -12,6 +12,7 @@ members = [
     "crates/latch_metrics",
     "crates/latch_runtime",
     "crates/latch_editor",
+    "crates/latch_env",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ latch_asset = { path = "crates/latch_asset" }
 latch_audio = { path = "crates/latch_audio" }
 latch_services = { path = "crates/latch_services" }
 latch_metrics = { path = "crates/latch_metrics" }
+latch_env = { path = "crates/latch_env" }
 
 # External dependencies (versions centralized)
 winit = "0.30"

@@ -24,9 +24,20 @@ pub struct Entity {
     pub index: usize,
 }
 
+/// A dense array of used entities. When an entity is freed, we swap it with the last one and pop.
+/// This allows O(1) allocation and deallocation.
+static mut ENTITY_POOL: Vec<Entity> = Vec::new();
+static mut NEXT_ENTITY: usize = 0;
+
 impl Entity {
+
+    const INITIAL_POOL_SIZE: usize = 4096;
+
     /// Create a new entity handle.
-    pub(crate) fn new(id: u64, generation: u32, archetype: ArchetypeId, index: usize) -> Self {
+    pub(crate) fn new(id: u64, archetype: ArchetypeId, index: usize) -> Self {
+        if ENTITY_POOL.capacity() == 0 {
+            ENTITY_POOL.reserve(Self::INITIAL_POOL_SIZE);
+        }
         Self {
             id,
             generation,
