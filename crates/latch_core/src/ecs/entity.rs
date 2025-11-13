@@ -1,70 +1,58 @@
-// entity.rs - Entity handles with generational indices
-//
-// Generational indices prevent stale entity handles from accessing wrong entities
-// after despawn+respawn cycles reuse the same slot.
-
+//! Entity identifiers and lookup helpers.
+//!
+//! Entities are represented as 64-bit handles that encode the dense
+//! index alongside a generation counter. World storage keeps a map
+//! from `Entity` to `EntityLoc`, allowing quick validation and lookup
+//! of archetype/row information without embedding location data in
 use crate::ecs::ArchetypeId;
 
-/// Entity handle with generational index for safety.
-/// 
-/// The generation is incremented each time an entity slot is reused,
-/// preventing stale handles from accessing the wrong entity.
+/// Dense index type used inside packed archetype storage.
+pub type EntityId = u32;
+/// Generation counter used to guard against stale handles.
+pub type Generation = u32;
+/// External entity handle (opaque to users).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Entity {
-    /// Globally unique entity ID (never reused).
-    pub id: u64,
-    
-    /// Generation counter for this slot (increments on despawn).
-    pub generation: u32,
-    
-    /// Archetype this entity belongs to.
-    pub archetype: ArchetypeId,
-    
-    /// Row index within the archetype's storage.
-    pub index: usize,
-}
-
-/// A dense array of used entities. When an entity is freed, we swap it with the last one and pop.
-/// This allows O(1) allocation and deallocation.
-static mut ENTITY_POOL: Vec<Entity> = Vec::new();
-static mut NEXT_ENTITY: usize = 0;
+pub struct Entity(u64);
 
 impl Entity {
+	const INDEX_BITS: u64 = 32;
+	const INDEX_MASK: u64 = (1u64 << Self::INDEX_BITS) - 1;
 
-    const INITIAL_POOL_SIZE: usize = 4096;
+	#[inline]
+	pub fn new(index: EntityId, generation: Generation) -> Self {
+	let index_part = index as u64 & Self::INDEX_MASK;
+	let gen_part = (generation as u64) << Self::INDEX_BITS;
+		Self(gen_part | index_part)
+	}
+	#[inline]
+	pub fn index(self) -> EntityId {
+		(self.0 & Self::INDEX_MASK) as EntityId
+	}
+	#[inline]
+	pub fn generation(self) -> Generation {
+		(self.0 >> Self::INDEX_BITS) as Generation
+	}
+	#[inline]
+	pub fn to_bits(self) -> u64 {
+		self.0
+	}
+	#[inline]
+	pub fn from_bits(bits: u64) -> Self {
+		Self(bits)
+	}
+}
 
-    /// Create a new entity handle.
-    pub(crate) fn new(id: u64, archetype: ArchetypeId, index: usize) -> Self {
-        if ENTITY_POOL.capacity() == 0 {
-            ENTITY_POOL.reserve(Self::INITIAL_POOL_SIZE);
-        }
-        Self {
-            id,
-            generation,
-            archetype,
-            index,
-        }
-    }
+/// Location of a live entity inside world storage.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct EntityLoc {
+	pub archetype: ArchetypeId,
+	pub index: usize,
+	pub generation: Generation,
+}
 
-    /// Pack the entity into a single u64 for FFI/scripting.
-    /// 
-    /// This is a lossy conversion - only the entity ID is preserved.
-    /// Use only for opaque handles in scripting contexts.
-    pub fn to_bits(self) -> u64 {
-        self.id
-    }
-
-    /// Unpack an entity from a u64.
-    /// 
-    /// This creates a partially invalid entity (generation, archetype, and index are zeroed).
-    /// Only the ID is restored. Use only for opaque handles in scripting contexts
-    /// where the World will validate and fill in the missing fields.
-    pub fn from_bits(bits: u64) -> Self {
-        Self {
-            id: bits,
-            generation: 0,
-            archetype: 0,
-            index: 0,
-        }
-    }
+impl EntityLoc {
+	#[inline]
+	pub fn new(archetype: ArchetypeId, index: usize, generation: Generation) -> Self {
+		Self { archetype, index, generation }
+	}
 }

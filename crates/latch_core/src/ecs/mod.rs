@@ -1,19 +1,29 @@
-// mod.rs - ECS module exports
-//
-// Runtime-defined component system with TypeScript compatibility.
-// See docs/ecs-runtime-components.md for detailed usage and architecture.
+//! Entity Component System core types.
+//!
+//! This module is being rewritten to follow the updated ECS design
+//! documented in `.github/instructions/ecs.instructions.md`. The goal
+//! is to provide cache-efficient, deterministic storage with rich
+//! runtime metadata for both Rust and scripted components. The current
+//! contents focus on foundational building blocks (components,
+//! entities, archetype layout). Higher-level systems such as storage
+//! and world management will be reintroduced in subsequent iterations.
 
 mod archetype;
-mod builder;
 mod component;
 mod entity;
-mod storage;
-mod world;
 
-// Public exports
-pub use archetype::{Archetype, ArchetypeId};
-pub use builder::EntityBuilder;
-pub use component::{meta_of, register_component, Component, ComponentId, ComponentMeta};
-pub use entity::Entity;
-pub use storage::ArchetypeStorage;
-pub use world::World;
+pub use archetype::{ArchetypeId, ArchetypeLayout};
+pub use component::{
+	handle_of_name,
+	meta_of,
+	meta_of_name,
+	register_component,
+	register_external_component_with_fields,
+	Component,
+	ComponentHandle,
+	ComponentId,
+	ComponentMeta,
+	FieldMeta,
+	__ComponentOnceCell,
+};
+pub use entity::{Entity, EntityId, EntityLoc, Generation};

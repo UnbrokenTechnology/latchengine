@@ -1,4 +1,3 @@
-```instructions
 ---
 applyTo: "crates/latch_render/**"
 ---
@@ -10,6 +9,10 @@ applyTo: "crates/latch_render/**"
 **Every feature works on every target**, from modern GPU to CPU-only fallback.
 
 Single authoring surface → runtime strategy selection based on capability probes.
+
+Always target 60+ FPS (higher is fine, but never lower).
+
+Because we have an always-on server (see [networking instructions](networking.instructions.md)), we automatically decouple simulation from rendering. Simulation should never be blocked by rendering, and rendering should never cause simulation to drop below 50 Ticks-Per-Second (TPS).
 
 ## Architecture
 
@@ -30,7 +33,7 @@ On startup:
 2. Query caps (MRT, SIMD, texture formats, uniform limits)
 3. Bind strategies from ranked table per feature
 4. Select asset formats to fit VRAM/caps
-5. Auto-scale to maintain 60 FPS
+5. Auto-scale to maintain 60+ FPS
 
 ## Strategy Examples
 
@@ -42,7 +45,9 @@ On startup:
 | Shadows | Depth map | Projected blob/static texture |
 | Particles | GPU compute/VBO | CPU batches |
 
-All strategies → visually equivalent results, only performance varies.
+It's not important that the fallback matches the GPU output pixel-for-pixel, just that it looks visually similar.
+
+All strategies → visually similar results, only performance varies.
 
 ## Auto-Scaler
 
@@ -57,7 +62,7 @@ Editor warns when CPU-raster worst-case would miss 60 FPS.
 
 ### Performance Target
 
-- 5,000-10,000 triangles/frame @ 60 FPS on low-spec CPUs
+- 10,000 triangles/frame @ 60 FPS on low-spec CPUs (e.g. 2000-era hardware)
 - Frustum culling (always on)
 - PVS (Potentially Visible Set) for static scenes
 - SIMD optimization (SSE2/NEON)
@@ -70,7 +75,7 @@ if frustum.cull_sphere(entity.pos, entity.radius) { skip; }
 ```
 
 **PVS** (pre-baked):
-- Build time: Ray cast through portals to compute room visibility
+- Build time: Ray cast through portals to compute room visibility. Only need to cast at vertices.
 - Runtime: O(1) lookup of visible rooms from current room
 - Reduces rendered geometry by ~70% (Quake 3 stats)
 
@@ -120,4 +125,3 @@ Runtime selects compiled variant matching current strategy.
 - Low-spec simulation toggles
 - Per-strategy timings
 - Auto-scaler logs and budget warnings
-```

@@ -1,152 +1,279 @@
-// component.rs
-use once_cell::sync::{Lazy, OnceCell};
+//! Component metadata and registration infrastructure.
+//!
+//! This module underpins the dynamic ECS component model. It exposes
+//! a global registry keyed by stable `ComponentId`s so that runtime
+//! systems (Rust, scripting, tooling) can consistently reason about
+//! component layouts.
+
+use once_cell::sync::OnceCell;
+
+pub use once_cell::sync::OnceCell as __ComponentOnceCell;
 use std::{
     collections::HashMap,
-    hash::{Hash, Hasher},
-    ops::Deref,
+    fmt,
     sync::RwLock,
 };
 
+/// Unique identifier assigned to each registered component.
 pub type ComponentId = u32;
 
-/// Runtime metadata for a component layout (works for Rust or external/scripted).
+/// Metadata for a single field inside a component layout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldMeta {
+    pub name: Box<str>,
+    pub offset: usize,
+    pub size: usize,
+}
+
+impl FieldMeta {
+    #[inline]
+    pub fn new(name: impl Into<Box<str>>, offset: usize, size: usize) -> Self {
+        Self { name: name.into(), offset, size }
+    }
+}
+
+/// Full runtime metadata for a component.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComponentMeta {
     pub id: ComponentId,
-    pub name: String,
-    pub size: usize,      // bytes of the logical element
-    pub align: usize,     // required alignment (power-of-two)
-    pub stride: usize,    // bytes between consecutive elements (>= size, multiple of align)
-    pub pod: bool,        // Plain-Old-Data (no Drop) hint for fast paths
+    pub name: Box<str>,
+    pub size: usize,
+    pub align: usize,
+    pub stride: usize,
+    pub pod: bool,
+    pub fields: Box<[FieldMeta]>,
 }
 
-/// Lightweight, copyable handle you pass around at runtime.
+impl ComponentMeta {
+    #[inline]
+    fn handle(&self) -> ComponentHandle {
+        ComponentHandle {
+            id: self.id,
+            size: self.size,
+            align: self.align,
+            stride: self.stride,
+            pod: self.pod,
+        }
+    }
+}
+
+/// Lightweight handle cached by systems once registration succeeds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ComponentHandle {
     pub id: ComponentId,
     pub size: usize,
     pub align: usize,
     pub stride: usize,
+    pub pod: bool,
 }
 
 impl ComponentHandle {
-    #[inline] pub fn bytes_per_elem(&self) -> usize { self.stride }
+    #[inline]
+    pub fn bytes_per_element(&self) -> usize {
+        self.stride
+    }
 }
 
-/// Global registry: name<->id maps + id->meta + next_id counter.
+#[derive(Default)]
 struct Registry {
     by_id: HashMap<ComponentId, ComponentMeta>,
-    by_name: HashMap<String, ComponentId>,
+    by_name: HashMap<Box<str>, ComponentId>,
     next_id: ComponentId,
 }
 
-static REG: Lazy<RwLock<Registry>> = Lazy::new(|| {
-    RwLock::new(Registry { by_id: HashMap::new(), by_name: HashMap::new(), next_id: 1 })
-});
+static REGISTRY: OnceCell<RwLock<Registry>> = OnceCell::new();
 
-/// Internal: insert-or-verify by name, returning (id, meta).
-fn ensure_component_inner(name: &str, size: usize, align: usize, stride: usize, pod: bool) -> ComponentMeta {
-    assert!(align.is_power_of_two(), "align must be a power of two");
-    assert!(stride >= size && stride % align == 0, "stride must be >= size and a multiple of align");
+fn registry_mut() -> std::sync::RwLockWriteGuard<'static, Registry> {
+    REGISTRY
+        .get_or_init(|| RwLock::new(Registry::default()))
+        .write()
+        .expect("component registry poisoned")
+}
 
-    let mut reg = REG.write().unwrap();
+fn validate_layout(meta: &ComponentMeta, size: usize, align: usize, stride: usize, pod: bool, fields: &[FieldMeta]) {
+    if meta.size != size || meta.align != align || meta.stride != stride || meta.pod != pod || meta.fields.as_ref() != fields {
+        panic!(
+            "component '{}' registered with conflicting layout",
+            meta.name
+        );
+    }
+}
 
+fn register_internal(
+    name: &str,
+    size: usize,
+    align: usize,
+    stride: usize,
+    pod: bool,
+    fields: Vec<FieldMeta>,
+) -> ComponentHandle {
+    assert!(align.is_power_of_two(), "component alignment must be power-of-two");
+    assert!(stride >= size, "stride must be >= size");
+    assert!(stride % align == 0, "stride must be a multiple of alignment");
+
+    let mut reg = registry_mut();
     if let Some(&id) = reg.by_name.get(name) {
-        let m = reg.by_id.get(&id).unwrap();
-        // Re-registration must match prior layout
-        assert_eq!(m.size,   size,   "component '{}' size changed ({} -> {})",   name, m.size, size);
-        assert_eq!(m.align,  align,  "component '{}' align changed ({} -> {})",  name, m.align, align);
-        assert_eq!(m.stride, stride, "component '{}' stride changed ({} -> {})", name, m.stride, stride);
-        assert_eq!(m.pod,    pod,    "component '{}' POD flag changed",          name);
-        return m.clone();
+        let existing = reg.by_id.get(&id).expect("registry missing component metadata");
+        validate_layout(existing, size, align, stride, pod, &fields);
+        return existing.handle();
     }
 
-    let id = {
-        let id = reg.next_id;
-        reg.next_id = id.checked_add(1).expect("component id overflow");
-        id
-    };
+    let id = reg.next_id;
+    reg.next_id = reg.next_id.checked_add(1).expect("component id overflow");
 
     let meta = ComponentMeta {
         id,
-        name: name.to_string(),
+        name: name.into(),
         size,
         align,
         stride,
         pod,
+        fields: fields.into_boxed_slice(),
     };
-    reg.by_name.insert(meta.name.clone(), id);
-    reg.by_id.insert(id, meta.clone());
-    meta
+
+    reg.by_name.insert(meta.name.clone(), meta.id);
+    reg.by_id.insert(meta.id, meta.clone());
+    meta.handle()
 }
 
-/// Register or fetch a Rust-defined POD component by name/layout.
-/// Returns a handle you can store or pass to systems.
-pub fn ensure_component_by_layout(name: &str, size: usize, align: usize, stride: usize, pod: bool) -> ComponentHandle {
-    let m = ensure_component_inner(name, size, align, stride, pod);
-    ComponentHandle { id: m.id, size: m.size, align: m.align, stride: m.stride }
+/// Register a Rust-side component layout.
+pub fn register_component(
+    name: &str,
+    size: usize,
+    align: usize,
+    stride: usize,
+    pod: bool,
+    fields: Vec<FieldMeta>,
+) -> ComponentHandle {
+    register_internal(name, size, align, stride, pod, fields)
 }
 
-/// External/script registration (e.g., from Lua/JS/C#/C++).
-pub fn register_external_component(name: &str, size: usize, align: usize, stride: usize) -> ComponentHandle {
-    ensure_component_by_layout(name, size, align, stride, true /* or false if you support Drop via callbacks */)
+/// Register an externally-described component (e.g. scripting, tooling).
+pub fn register_external_component_with_fields(
+    name: &str,
+    size: usize,
+    align: usize,
+    stride: usize,
+    fields: Vec<FieldMeta>,
+    pod: bool,
+) -> ComponentHandle {
+    register_internal(name, size, align, stride, pod, fields)
 }
 
-/// Lookup by id or name.
-pub fn meta_of_id(id: ComponentId) -> Option<ComponentMeta> {
-    REG.read().unwrap().by_id.get(&id).cloned()
+/// Retrieve metadata by id.
+pub fn meta_of(id: ComponentId) -> Option<ComponentMeta> {
+    REGISTRY
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .and_then(|reg| reg.by_id.get(&id).cloned())
 }
+
+/// Retrieve metadata by name.
 pub fn meta_of_name(name: &str) -> Option<ComponentMeta> {
-    REG.read().unwrap().by_name.get(name).and_then(|id| REG.read().unwrap().by_id.get(id).cloned())
+    REGISTRY
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .and_then(|reg| reg.by_name.get(name).and_then(|id| reg.by_id.get(id)).cloned())
 }
 
-/// Fast path: get a handle by name (must already be registered).
+/// Resolve a handle by name, panicking if not registered.
 pub fn handle_of_name(name: &str) -> ComponentHandle {
-    let m = meta_of_name(name).unwrap_or_else(|| panic!("component '{}' not registered", name));
-    ComponentHandle { id: m.id, size: m.size, align: m.align, stride: m.stride }
+    meta_of_name(name)
+        .unwrap_or_else(|| panic!("component '{}' not registered", name))
+        .handle()
 }
 
-/// Trait for Rust-defined components (no manual ID typing).
-/// ID is assigned on first use and cached in a per-type OnceCell.
-pub trait Component: 'static + Sized + Send + Sync {
+/// Trait implemented by Rust-native component types.
+pub trait Component: 'static + Send + Sync {
     const NAME: &'static str;
-    /// Is this POD (no Drop, relocatable)? Defaults to true.
-    fn is_pod() -> bool { true }
 
-    /// Per-type cached handle (assigned at first call).
-    fn handle() -> ComponentHandle where Self: Sized {
-        static HANDLE: OnceCell<ComponentHandle> = OnceCell::new();
-        *HANDLE.get_or_init(|| {
-            let size = std::mem::size_of::<Self>();
-            let align = std::mem::align_of::<Self>();
-            let stride = size.next_multiple_of(align); // usually == size
-            ensure_component_by_layout(Self::NAME, size, align, stride, Self::is_pod())
-        })
+    /// Override to mark components that drop resources.
+    fn is_pod() -> bool {
+        true
     }
 
-    /// Convenience: component id.
-    #[inline] fn id() -> ComponentId { Self::handle().id }
+    /// Provide compile-time field metadata (optional).
+    fn fields() -> Vec<FieldMeta> {
+        Vec::new()
+    }
+
+    /// Register the component layout and return its handle.
+    fn register_layout() -> ComponentHandle
+    where
+        Self: Sized,
+    {
+        let size = std::mem::size_of::<Self>();
+        let align = std::mem::align_of::<Self>();
+        let stride = size.next_multiple_of(align);
+        register_component(Self::NAME, size, align, stride, Self::is_pod(), Self::fields())
+    }
+
+    /// Lazy component handle registration.
+    fn handle() -> ComponentHandle
+    where
+        Self: Sized,
+    {
+        static HANDLE: OnceCell<ComponentHandle> = OnceCell::new();
+        *HANDLE.get_or_init(Self::register_layout)
+    }
+
+    #[inline]
+    fn id() -> ComponentId
+    where
+        Self: Sized,
+    {
+        Self::handle().id
+    }
 }
 
-/// Helper macro: implement `Component` for a Rust struct with a given name.
-/// Usage:
-///   #[derive(Clone, Copy)] struct Position { x: f32, y: f32 }
-///   define_component!(Position, "Position");
+/// Helper macro for trivial POD components.
 #[macro_export]
 macro_rules! define_component {
     ($ty:ty, $name:expr) => {
-        impl $crate::component::Component for $ty {
+        impl $crate::ecs::Component for $ty {
             const NAME: &'static str = $name;
-            // If your type has Drop or interior refs, override `fn is_pod() -> bool { false }`.
+        }
+    };
+
+    ($ty:ty, $id:expr, $name:expr) => {
+        impl $crate::ecs::Component for $ty {
+            const NAME: &'static str = $name;
+
+            fn handle() -> $crate::ecs::ComponentHandle {
+                static HANDLE: $crate::ecs::component::__ComponentOnceCell<$crate::ecs::ComponentHandle> = $crate::ecs::component::__ComponentOnceCell::new();
+                *HANDLE.get_or_init(|| {
+                    let size = std::mem::size_of::<$ty>();
+                    let align = std::mem::align_of::<$ty>();
+                    let stride = size.next_multiple_of(align);
+                    let handle = $crate::ecs::register_component(
+                        $name,
+                        size,
+                        align,
+                        stride,
+                        <$ty as $crate::ecs::Component>::is_pod(),
+                        <$ty as $crate::ecs::Component>::fields(),
+                    );
+                    debug_assert_eq!(
+                        handle.id,
+                        $id,
+                        "component '{}' registered with id {} but expected {}",
+                        $name,
+                        handle.id,
+                        $id,
+                    );
+                    handle
+                })
+            }
         }
     };
 }
 
-/// Macro to fetch a runtime handle by name (for dynamic systems).
-/// Usage: let pos = component!("Position");
-#[macro_export]
-macro_rules! component {
-    ($name:expr) => {
-        $crate::component::handle_of_name($name)
-    };
+impl fmt::Display for ComponentMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ComponentMeta {{ id: {}, name: {}, size: {}, align: {}, stride: {}, pod: {} }}",
+            self.id, self.name, self.size, self.align, self.stride, self.pod
+        )
+    }
 }

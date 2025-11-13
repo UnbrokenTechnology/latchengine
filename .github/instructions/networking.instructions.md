@@ -1,4 +1,3 @@
-```instructions
 ---
 applyTo: "crates/latch_net/**"
 ---
@@ -8,7 +7,7 @@ applyTo: "crates/latch_net/**"
 ## Core Principles
 
 1. **Server always runs** - even single-player has embedded server
-2. **Deterministic simulation** - 60 Hz fixed tick, seeded RNG
+2. **Deterministic simulation** - 50 Hz fixed tick, seeded RNG
 3. **Rollback networking** - client prediction + server correction
 4. **Distributed authority** - multiple servers own different world regions
 
@@ -134,18 +133,17 @@ Server maintains rewind buffer:
 ## Default Settings (Recommended)
 
 ```rust
-const TICK_RATE: u32 = 60;
+const TICK_RATE: u32 = 50;
 const INPUT_BUFFER_TICKS: u32 = 2;
 const ROLLBACK_WINDOW_TICKS: u32 = 8;
 const CELL_SIZE_METERS: f32 = 192.0;
 const BUBBLE_SIZE_PLAYERS: usize = 16;
-const TARGET_RTT_MS: u32 = 30;
+const TARGET_RTT_MS: u32 = 40;
 ```
 
 ## MMO Scaling
 
 - Cell size: 128-256 m with 2-cell hysteresis
 - Bubble size: 2-16 players
-- Target RTT: ≤30 ms
+- Target RTT: ≤40 ms (2 ticks)
 - Workers auto-balance load via consistent hashing
-```

@@ -15,6 +15,15 @@ Core principles:
 - Dynamic component model supporting scripting languages.
 - Batch despawning + swap-remove compaction.
 - Generic PagedPool usable outside ECS.
+- 50 Hz fixed tick, deterministic simulation.
+
+**Why 50 Hz?**
+- 1000 ms is divisible by 50, making time calculations simpler. This helps us synchronize with real-world time so we can keep servers in sync and avoid drift.
+- 50 Hz is fast enough for smooth gameplay while allowing more time for complex simulations and scripting.
+- 50 Hz is a common choice for server tick rates in multiplayer games, so it aligns well with our networking model.
+- 50 Hz allows for a larger rollback window (8 ticks = 160 ms) which provides better latency compensation for players.
+
+Note that physics simulation tick rate can be decoupled from frame rate. The ECS will run at 50 Hz, but rendering can be at 60 FPS or higher with interpolation. All rendering interpolation should be done on the GPU to avoid CPU overhead.
 
 ---
 
