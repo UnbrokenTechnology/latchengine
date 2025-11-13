@@ -6,6 +6,7 @@
 //! - Deterministic time and math
 //! - Memory management
 
+pub mod pool;
 pub mod ecs;
 pub mod time;
 pub mod math;

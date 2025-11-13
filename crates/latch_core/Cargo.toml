@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 # Internal dependencies
 latch_metrics = { workspace = true }
+latch_env = { workspace = true }
 
 # External dependencies
 glam = { workspace = true }
