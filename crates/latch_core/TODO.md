@@ -6,5 +6,7 @@
 - [x] Reimplement `ecs::storage::ArchetypeStorage` with page-sized column planning and deterministic bulk despawn flow.
 - [x] Introduce `ArchetypePlan` with cache-aware page sizing based on `latch_env::memory::Memory::detect()`.
 - [x] Build the runtime storage wrapper on top of the new planning API (columns + entity sidecar).
-- [ ] Replace the legacy world/builder stack with the new archetype layout + scheduler plan (entity index, despawn queues, system tiling).
+- [ ] Replace the raw `ComponentColumn` byte pages with an adapter that leverages the typed `Column<T>` API once world integration clarifies the needs.
+- [x] Replace the legacy world/builder stack with a generational entity index and batched despawn queues wired to the new storage layer.
+- [ ] Integrate scheduler-facing archetype tiling and system plan generation on top of the new world/runtime plumbing.
 - [ ] Design tile iteration helpers (erosion/batching API) to satisfy L1/L2 cache goals and integrate with scheduler jobs.

@@ -64,6 +64,34 @@ impl<T> Page<T> {
         }
     }
 
+    #[inline]
+    pub fn get(&self, idx: usize) -> Result<&T, PoolError> {
+        if idx >= self.len {
+            return Err(PoolError::IndexOutOfBounds {
+                index: idx,
+                len: self.len,
+            });
+        }
+        Ok(unsafe {
+            // SAFETY: index bounds checked above and entries 0..len are initialized.
+            &*self.buf[idx].as_ptr()
+        })
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, idx: usize) -> Result<&mut T, PoolError> {
+        if idx >= self.len {
+            return Err(PoolError::IndexOutOfBounds {
+                index: idx,
+                len: self.len,
+            });
+        }
+        Ok(unsafe {
+            // SAFETY: index bounds checked above and entries 0..len are initialized.
+            &mut *self.buf[idx].as_mut_ptr()
+        })
+    }
+
     pub fn slice(&self, range: Range<usize>) -> Result<&[T], PoolError> {
         ensure_range(range.clone(), self.len)?;
         Ok(unsafe {

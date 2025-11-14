@@ -114,8 +114,7 @@ impl<T> Column<T> {
         let mut moved = None;
         self.cur
             .free_one_swap_remove(gidx, |from, to| moved = Some((from, to)))?;
-        self.nxt
-            .free_one_swap_remove(gidx, |_from, _to| {})?;
+        self.nxt.free_one_swap_remove(gidx, |_from, _to| {})?;
         if let Some((from, to)) = moved {
             fix_index(from, to);
         }
@@ -135,8 +134,7 @@ impl<T> Column<T> {
         let mut moves = Vec::new();
         self.cur
             .free_bulk_swap_remove(gidxs.clone(), |from, to| moves.push((from, to)))?;
-        self.nxt
-            .free_bulk_swap_remove(gidxs, |_from, _to| {})?;
+        self.nxt.free_bulk_swap_remove(gidxs, |_from, _to| {})?;
         for (from, to) in moves {
             fix_index(from, to);
         }

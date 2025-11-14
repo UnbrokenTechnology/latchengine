@@ -1,18 +1,63 @@
-// builder.rs - EntityBuilder for constructing entities
-//
-// Collects components before spawning to calculate archetype once.
+use crate::ecs::{meta_of, ArchetypeLayout, Component, ComponentId};
+use std::{collections::HashMap, mem, ptr};
+use thiserror::Error;
 
-use crate::ecs::{Archetype, Component, ComponentId};
-use std::collections::HashMap;
+/// Owned byte payload for a single component instance.
+#[derive(Debug)]
+pub struct ComponentBytes {
+    component_id: ComponentId,
+    bytes: Box<[u8]>,
+}
 
-/// Builder for constructing entities with components.
-/// 
-/// Components are collected first, then the archetype is calculated,
-/// and finally the entity is spawned. This ensures entities are placed
-/// in the correct archetype from the start (no migration needed).
+impl ComponentBytes {
+    #[inline]
+    pub fn component_id(&self) -> ComponentId {
+        self.component_id
+    }
+
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Fully constructed entity blueprint used during spawning.
+#[derive(Debug)]
+pub struct EntityBlueprint {
+    layout: ArchetypeLayout,
+    components: Vec<ComponentBytes>,
+}
+
+impl EntityBlueprint {
+    #[inline]
+    pub fn layout(&self) -> &ArchetypeLayout {
+        &self.layout
+    }
+
+    #[inline]
+    pub fn components(&self) -> &[ComponentBytes] {
+        &self.components
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum EntityBuilderError {
+    #[error("component id {component_id} is not registered")]
+    ComponentNotRegistered { component_id: ComponentId },
+    #[error(
+        "component id {component_id} expects stride {expected} bytes but received {actual} bytes"
+    )]
+    StrideMismatch {
+        component_id: ComponentId,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+/// Builder for constructing entity blueprints prior to spawning.
+#[derive(Default)]
 pub struct EntityBuilder {
-    components: HashMap<ComponentId, Vec<u8>>,
-    order: Vec<ComponentId>, // Maintain insertion order for determinism
+    components: HashMap<ComponentId, Box<[u8]>>,
 }
 
 impl EntityBuilder {
@@ -20,73 +65,74 @@ impl EntityBuilder {
     pub fn new() -> Self {
         Self {
             components: HashMap::new(),
-            order: Vec::new(),
         }
     }
 
-    /// Add a Rust-typed component.
-    /// 
-    /// The component is copied to raw bytes and the original is forgotten
-    /// to avoid double-drop.
+    /// Add a Rust-typed component by value.
     pub fn with<T: Component>(mut self, value: T) -> Self {
-        T::ensure_registered();
-        let id = T::ID;
-        
-        // Convert component to bytes
-        let bytes = unsafe {
-            let ptr = &value as *const T as *const u8;
-            std::slice::from_raw_parts(ptr, std::mem::size_of::<T>()).to_vec()
-        };
-        
-        // Track insertion order
-        if !self.components.contains_key(&id) {
-            self.order.push(id);
+        let handle = T::handle();
+        let mut bytes = vec![0u8; handle.stride];
+        unsafe {
+            // SAFETY: value is still alive, so copying `size_of::<T>()` bytes is valid.
+            ptr::copy_nonoverlapping(
+                &value as *const T as *const u8,
+                bytes.as_mut_ptr(),
+                mem::size_of::<T>(),
+            );
         }
-        
-        self.components.insert(id, bytes);
-        std::mem::forget(value); // Prevent double-drop
+        mem::forget(value);
+        self.components.insert(handle.id, bytes.into_boxed_slice());
         self
     }
 
-    /// Add a component by raw bytes (for TypeScript/JSON components).
-    /// 
-    /// # Panics
-    /// Panics if bytes.len() != expected_size.
-    pub fn with_raw(mut self, id: ComponentId, bytes: Vec<u8>, expected_size: usize) -> Self {
-        assert_eq!(
-            bytes.len(),
-            expected_size,
-            "Raw component size mismatch for id={}: expected {}, got {}",
-            id,
-            expected_size,
-            bytes.len()
-        );
-        
-        if !self.components.contains_key(&id) {
-            self.order.push(id);
+    /// Add a component by raw bytes (scripting, serialization, etc.).
+    pub fn with_raw_bytes(
+        mut self,
+        component_id: ComponentId,
+        bytes: Vec<u8>,
+    ) -> Result<Self, EntityBuilderError> {
+        let meta = meta_of(component_id)
+            .ok_or(EntityBuilderError::ComponentNotRegistered { component_id })?;
+        if bytes.len() != meta.stride {
+            return Err(EntityBuilderError::StrideMismatch {
+                component_id,
+                expected: meta.stride,
+                actual: bytes.len(),
+            });
         }
-        
-        self.components.insert(id, bytes);
-        self
+        self.components
+            .insert(component_id, bytes.into_boxed_slice());
+        Ok(self)
     }
 
-    /// Calculate the archetype for this entity.
-    pub fn archetype(&self) -> Archetype {
-        let mut ids: Vec<ComponentId> = self.components.keys().copied().collect();
-        ids.sort_unstable();
-        Archetype::from_components(ids)
-    }
+    /// Finalize the builder into an `EntityBlueprint` suitable for spawning.
+    pub fn build(self) -> Result<EntityBlueprint, EntityBuilderError> {
+        let mut components: Vec<(ComponentId, Box<[u8]>)> = self.components.into_iter().collect();
+        components.sort_by_key(|(id, _)| *id);
 
-    /// Consume the builder and return components as a sorted list.
-    pub fn into_components(self) -> Vec<(ComponentId, Vec<u8>)> {
-        let mut v: Vec<_> = self.components.into_iter().collect();
-        v.sort_by_key(|(id, _)| *id);
-        v
-    }
-}
+        for (component_id, data) in &components {
+            let meta =
+                meta_of(*component_id).ok_or(EntityBuilderError::ComponentNotRegistered {
+                    component_id: *component_id,
+                })?;
+            if data.len() != meta.stride {
+                return Err(EntityBuilderError::StrideMismatch {
+                    component_id: *component_id,
+                    expected: meta.stride,
+                    actual: data.len(),
+                });
+            }
+        }
 
-impl Default for EntityBuilder {
-    fn default() -> Self {
-        Self::new()
+        let layout = ArchetypeLayout::new(components.iter().map(|(id, _)| *id).collect());
+        let components = components
+            .into_iter()
+            .map(|(component_id, bytes)| ComponentBytes {
+                component_id,
+                bytes,
+            })
+            .collect();
+
+        Ok(EntityBlueprint { layout, components })
     }
 }

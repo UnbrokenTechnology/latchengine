@@ -1,240 +1,345 @@
-// world.rs - ECS World with entity management and iteration
-
 use crate::ecs::{
-    ArchetypeId, ArchetypeStorage, Component, ComponentId, Entity, EntityBuilder,
+    storage::{plan_archetype, ArchetypeStorage, PageBudget, PlanError, StorageError},
+    ArchetypeId, ArchetypeLayout, ComponentId, Entity, EntityBuilder, EntityBuilderError, EntityId,
+    EntityLoc, Generation,
 };
-use std::collections::{hash_map::Entry, HashMap};
+use std::{collections::HashMap, convert::TryFrom};
+use thiserror::Error;
 
-/// The main ECS world containing all entities and components.
+struct ArchetypeEntry {
+    storage: ArchetypeStorage,
+    pending_despawns: Vec<usize>,
+}
+
+impl ArchetypeEntry {
+    fn new(storage: ArchetypeStorage) -> Self {
+        Self {
+            storage,
+            pending_despawns: Vec::new(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SlotLocation {
+    archetype: ArchetypeId,
+    row: usize,
+}
+
+#[derive(Debug)]
+struct EntitySlot {
+    generation: Generation,
+    location: Option<SlotLocation>,
+}
+
+impl EntitySlot {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            location: None,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WorldError {
+    #[error(transparent)]
+    Builder(#[from] EntityBuilderError),
+    #[error(transparent)]
+    Plan(#[from] PlanError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error("entity {entity:?} refers to unknown index")]
+    UnknownEntity { entity: Entity },
+    #[error("entity {entity:?} is stale")]
+    StaleEntity { entity: Entity },
+    #[error("entity {entity:?} is not alive")]
+    EntityNotAlive { entity: Entity },
+    #[error("entity index overflow: {index}")]
+    EntityIndexOverflow { index: usize },
+    #[error("entity slot missing for id {entity_id}")]
+    UnknownEntityIndex { entity_id: EntityId },
+    #[error("storage for archetype {archetype_id} missing")]
+    MissingArchetype { archetype_id: ArchetypeId },
+}
+
 pub struct World {
-    next_entity_id: u64,
-    storages: HashMap<ArchetypeId, ArchetypeStorage>,
-    comp_index: HashMap<ComponentId, Vec<ArchetypeId>>,
+    page_budget: PageBudget,
+    storages: HashMap<ArchetypeId, ArchetypeEntry>,
+    component_index: HashMap<ComponentId, Vec<ArchetypeId>>,
+    slots: Vec<EntitySlot>,
+    free_list: Vec<EntityId>,
+    live_count: usize,
 }
 
 impl World {
-    /// Create a new empty world.
     pub fn new() -> Self {
+        Self::with_page_budget(PageBudget::detect())
+    }
+
+    pub fn with_page_budget(page_budget: PageBudget) -> Self {
         Self {
-            next_entity_id: 1,
+            page_budget,
             storages: HashMap::new(),
-            comp_index: HashMap::new(),
+            component_index: HashMap::new(),
+            slots: Vec::new(),
+            free_list: Vec::new(),
+            live_count: 0,
         }
     }
 
-    /// Spawn an entity from a builder.
-    /// 
-    /// The entity's archetype is calculated from its components and never changes.
-    /// Uses object pooling to reuse despawned entity slots.
-    /// 
-    /// **Double-buffering note**: Component data is written to BOTH buffers during spawn
-    /// to ensure the entity is immediately readable on the current tick and writable
-    /// on the next tick. This prevents uninitialized data issues.
-    pub fn spawn(&mut self, builder: EntityBuilder) -> Entity {
-        let archetype = builder.archetype();
+    pub fn page_budget(&self) -> PageBudget {
+        self.page_budget
+    }
 
-        // Get or create storage for this archetype
-        let storage = match self.storages.entry(archetype.id) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => {
-                // Create new storage
-                let s = v.insert(ArchetypeStorage::new(archetype.clone()));
-                
-                // Update reverse index
-                for &cid in &archetype.components {
-                    self.comp_index.entry(cid).or_default().push(archetype.id);
-                }
-                
-                s
+    pub fn set_page_budget(&mut self, budget: PageBudget) {
+        self.page_budget = budget;
+    }
+
+    pub fn spawn(&mut self, builder: EntityBuilder) -> Result<Entity, WorldError> {
+        let blueprint = builder.build()?;
+        let archetype_id = blueprint.layout().id();
+        self.ensure_archetype_exists(blueprint.layout())?;
+
+        let (entity, entity_id) = self.allocate_entity()?;
+
+        let row = {
+            let entry = self
+                .storages
+                .get_mut(&archetype_id)
+                .ok_or(WorldError::MissingArchetype { archetype_id })?;
+            let row = entry.storage.alloc_row(entity_id)?;
+            for component in blueprint.components() {
+                entry.storage.write_component(
+                    component.component_id(),
+                    row,
+                    component.bytes(),
+                    None,
+                )?;
             }
+            row
         };
 
-        // Allocate entity ID and row
-        let id = self.next_entity_id;
-        self.next_entity_id += 1;
-
-        let row = storage.add_entity(id);
-
-        // Write components
-        for (cid, bytes) in builder.into_components() {
-            storage.write_component(row, cid, &bytes);
-        }
-        
-        storage.set_entity(row, id);
-
-        Entity::new(id, archetype.id, row)
+        self.record_location(
+            entity_id,
+            SlotLocation {
+                archetype: archetype_id,
+                row,
+            },
+        )?;
+        self.live_count += 1;
+        Ok(entity)
     }
 
-    /// Despawn an entity.
-    /// 
-    /// The entity's slot is returned to the pool and its generation is incremented.
-    /// This invalidates any stale handles pointing to the old entity.
-    pub fn despawn(&mut self, entity: Entity) -> bool {
-        if let Some(storage) = self.storages.get_mut(&entity.archetype) {
-            if storage.validate_generation(entity) {
-                storage.free_row(entity.index);
-                return true;
+    pub fn despawn(&mut self, entity: Entity) -> Result<(), WorldError> {
+        let index = entity.index() as usize;
+        let slot = self
+            .slots
+            .get_mut(index)
+            .ok_or(WorldError::UnknownEntity { entity })?;
+        if slot.generation != entity.generation() {
+            return Err(WorldError::StaleEntity { entity });
+        }
+        let location = slot
+            .location
+            .take()
+            .ok_or(WorldError::EntityNotAlive { entity })?;
+        let entry =
+            self.storages
+                .get_mut(&location.archetype)
+                .ok_or(WorldError::MissingArchetype {
+                    archetype_id: location.archetype,
+                })?;
+        entry.pending_despawns.push(location.row);
+        self.live_count = self.live_count.saturating_sub(1);
+        Ok(())
+    }
+
+    pub fn flush_despawns(&mut self) -> Result<(), WorldError> {
+        let archetype_ids: Vec<ArchetypeId> = self
+            .storages
+            .iter()
+            .filter(|(_, entry)| !entry.pending_despawns.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+
+        for archetype_id in archetype_ids {
+            let mut victims = Vec::new();
+            let mut move_updates = Vec::new();
+            {
+                let entry = self
+                    .storages
+                    .get_mut(&archetype_id)
+                    .ok_or(WorldError::MissingArchetype { archetype_id })?;
+                if entry.pending_despawns.is_empty() {
+                    continue;
+                }
+                entry.pending_despawns.sort_unstable();
+                entry.pending_despawns.dedup();
+
+                for &row in &entry.pending_despawns {
+                    victims.push(entry.storage.entity_id_at(row)?);
+                }
+
+                let mut move_rows = Vec::new();
+                entry.storage.free_bulk_swap_remove(
+                    entry.pending_despawns.clone(),
+                    |from, to| {
+                        move_rows.push((from, to));
+                    },
+                )?;
+                entry.pending_despawns.clear();
+
+                for (_from, to) in move_rows {
+                    let entity_id = entry.storage.entity_id_at(to)?;
+                    move_updates.push((entity_id, to));
+                }
+            }
+
+            for entity_id in victims {
+                self.finish_despawn(entity_id)?;
+            }
+            for (entity_id, row) in move_updates {
+                self.update_entity_location(entity_id, archetype_id, row)?;
             }
         }
-        false
+
+        Ok(())
     }
 
-    /// Get an immutable reference to a component.
-    /// 
-    /// Returns None if the entity is invalid or doesn't have the component.
-    pub fn get_component<T: Component>(&self, entity: Entity) -> Option<&T> {
-        let storage = self.storages.get(&entity.archetype)?;
-        if !storage.validate_generation(entity) {
-            return None;
+    pub fn locate(&self, entity: Entity) -> Result<EntityLoc, WorldError> {
+        let index = entity.index() as usize;
+        let slot = self
+            .slots
+            .get(index)
+            .ok_or(WorldError::UnknownEntity { entity })?;
+        if slot.generation != entity.generation() {
+            return Err(WorldError::StaleEntity { entity });
         }
-        storage.row_typed::<T>(entity.index)
+        let location = slot.location.ok_or(WorldError::EntityNotAlive { entity })?;
+        Ok(EntityLoc::new(
+            location.archetype,
+            location.row,
+            slot.generation,
+        ))
     }
 
-    /// Get a mutable reference to a component.
-    /// 
-    /// Returns None if the entity is invalid or doesn't have the component.
-    pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
-        let storage = self.storages.get_mut(&entity.archetype)?;
-        if !storage.validate_generation(entity) {
-            return None;
-        }
-        storage.row_typed_mut::<T>(entity.index)
+    pub fn storage(&self, archetype: ArchetypeId) -> Option<&ArchetypeStorage> {
+        self.storages.get(&archetype).map(|entry| &entry.storage)
     }
 
-    /// Get an immutable typed column for a component in a specific archetype.
-    pub fn column<T: Component>(&self, archetype: ArchetypeId) -> Option<&[T]> {
-        self.storages.get(&archetype)?.column_as_slice::<T>()
+    pub fn storage_mut(&mut self, archetype: ArchetypeId) -> Option<&mut ArchetypeStorage> {
+        self.storages
+            .get_mut(&archetype)
+            .map(|entry| &mut entry.storage)
     }
 
-    /// Get a mutable typed column for a component in a specific archetype.
-    pub fn column_mut<T: Component>(&mut self, archetype: ArchetypeId) -> Option<&mut [T]> {
-        self.storages.get_mut(&archetype)?.column_as_slice_mut::<T>()
+    pub fn archetypes_with(&self, component_id: ComponentId) -> &[ArchetypeId] {
+        self.component_index
+            .get(&component_id)
+            .map(|ids| ids.as_slice())
+            .unwrap_or(&[])
     }
 
-    /// Get all archetype IDs that contain a specific component.
-    pub fn archetypes_with(&self, cid: ComponentId) -> &[ArchetypeId] {
-        self.comp_index.get(&cid).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-
-    /// Iterate over archetypes that have ALL of the specified components.
-    /// 
-    /// This is the low-level primitive for zero-cost multi-component iteration.
-    /// Returns archetype IDs - use `archetype_storage()` to get the actual data.
-    pub fn archetypes_with_all(&self, component_ids: &[ComponentId]) -> Vec<ArchetypeId> {
-        if component_ids.is_empty() {
-            return Vec::new();
-        }
-        
-        // Start with archetypes that have the first component
-        let mut result: Vec<ArchetypeId> = self.archetypes_with(component_ids[0]).to_vec();
-        
-        // Filter to only archetypes that have ALL components
-        for &cid in &component_ids[1..] {
-            let archs = self.archetypes_with(cid);
-            result.retain(|a| archs.contains(a));
-        }
-        
-        result
-    }
-
-    /// Get direct access to an archetype's storage.
-    /// 
-    /// This allows zero-cost access to component slices.
-    pub fn archetype_storage(&self, archetype: ArchetypeId) -> Option<&ArchetypeStorage> {
-        self.storages.get(&archetype)
-    }
-
-    /// Get mutable access to an archetype's storage.
-    /// 
-    /// This allows zero-cost access to mutable component slices.
-    pub fn archetype_storage_mut(&mut self, archetype: ArchetypeId) -> Option<&mut ArchetypeStorage> {
-        self.storages.get_mut(&archetype)
-    }
-
-    /// Get the total number of entities (including despawned slots).
-    pub fn entity_count(&self) -> usize {
-        self.storages.values().map(|s| s.len()).sum()
-    }
-
-    /// Get the number of live entities (excluding free slots).
     pub fn live_entity_count(&self) -> usize {
-        self.storages.values().map(|s| s.len()).sum()
+        self.live_count
     }
 
-    /// Get all archetype storages.
-    pub fn archetypes(&self) -> impl Iterator<Item = &ArchetypeStorage> {
-        self.storages.values()
+    pub fn allocated_slots(&self) -> usize {
+        self.slots.len()
     }
 
-    /// Execute a function on all entities with the specified components.
-    /// 
-    /// This is the primary API for multi-component iteration.
-    /// Use `columns!` and `columns_mut!` macros to extract component slices.
-    /// 
-    /// # Example
-    /// ```ignore
-    /// use latch_core::{columns, columns_mut};
-    /// 
-    /// world.for_each(&[Position::ID, Velocity::ID], |storage| {
-    ///     let positions = columns!(storage, Position);
-    ///     let velocities = columns_mut!(storage, Velocity);
-    ///     
-    ///     // Iterate and update components
-    ///     velocities.iter_mut().zip(positions.iter())
-    ///         .for_each(|(vel, pos)| {
-    ///             vel.x += pos.x * dt;
-    ///             vel.y += pos.y * dt;
-    ///         });
-    /// });
-    /// ```
-    pub fn for_each<F>(&mut self, component_ids: &[ComponentId], mut f: F)
-    where
-        F: FnMut(&mut ArchetypeStorage),
-    {
-        let archetypes = self.archetypes_with_all(component_ids);
-        
-        for &arch_id in &archetypes {
-            if let Some(storage) = self.storages.get_mut(&arch_id) {
-                f(storage);
+    pub fn swap_buffers(&mut self) {
+        for entry in self.storages.values_mut() {
+            entry.storage.swap_buffers();
+        }
+    }
+
+    fn ensure_archetype_exists(&mut self, layout: &ArchetypeLayout) -> Result<(), WorldError> {
+        let archetype_id = layout.id();
+        if self.storages.contains_key(&archetype_id) {
+            return Ok(());
+        }
+
+        let plan = plan_archetype(layout.clone(), self.page_budget)?;
+        let component_ids: Vec<ComponentId> =
+            plan.columns.iter().map(|col| col.component_id).collect();
+        let storage = ArchetypeStorage::from_plan(plan);
+        self.storages
+            .insert(archetype_id, ArchetypeEntry::new(storage));
+        for component_id in component_ids {
+            self.component_index
+                .entry(component_id)
+                .or_default()
+                .push(archetype_id);
+        }
+        Ok(())
+    }
+
+    fn allocate_entity(&mut self) -> Result<(Entity, EntityId), WorldError> {
+        let entity_id = if let Some(id) = self.free_list.pop() {
+            id
+        } else {
+            let index = self.slots.len();
+            let id = u32::try_from(index).map_err(|_| WorldError::EntityIndexOverflow { index })?;
+            self.slots.push(EntitySlot::new());
+            id
+        };
+
+        let slot_index = entity_id as usize;
+        let generation = self
+            .slots
+            .get(slot_index)
+            .map(|slot| slot.generation)
+            .ok_or(WorldError::UnknownEntityIndex { entity_id })?;
+        let entity = Entity::new(entity_id, generation);
+        Ok((entity, entity_id))
+    }
+
+    fn record_location(
+        &mut self,
+        entity_id: EntityId,
+        loc: SlotLocation,
+    ) -> Result<(), WorldError> {
+        let slot = self
+            .slots
+            .get_mut(entity_id as usize)
+            .ok_or(WorldError::UnknownEntityIndex { entity_id })?;
+        slot.location = Some(loc);
+        Ok(())
+    }
+
+    fn finish_despawn(&mut self, entity_id: EntityId) -> Result<(), WorldError> {
+        let slot = self
+            .slots
+            .get_mut(entity_id as usize)
+            .ok_or(WorldError::UnknownEntityIndex { entity_id })?;
+        debug_assert!(slot.location.is_none());
+        slot.generation = slot.generation.wrapping_add(1);
+        self.free_list.push(entity_id);
+        Ok(())
+    }
+
+    fn update_entity_location(
+        &mut self,
+        entity_id: EntityId,
+        archetype: ArchetypeId,
+        row: usize,
+    ) -> Result<(), WorldError> {
+        let slot = self
+            .slots
+            .get_mut(entity_id as usize)
+            .ok_or(WorldError::UnknownEntityIndex { entity_id })?;
+        match &mut slot.location {
+            Some(loc) => {
+                debug_assert_eq!(loc.archetype, archetype);
+                loc.row = row;
+            }
+            None => {
+                slot.location = Some(SlotLocation { archetype, row });
             }
         }
-    }
-
-    /// Swap read/write buffers for all archetypes.
-    /// 
-    /// **Call this once per physics tick** after all systems have executed.
-    /// This makes all writes from this tick visible for reading on the next tick,
-    /// ensuring deterministic parallel updates.
-    /// 
-    /// # Determinism
-    /// 
-    /// Without double-buffering, the order in which entities are processed matters:
-    /// - Entity A collides with Entity B
-    /// - If A is processed first, it reads B's old velocity and writes A's new velocity
-    /// - If B is processed first, it reads A's old velocity and writes B's new velocity
-    /// - Different processing orders → different results (non-deterministic)
-    /// 
-    /// With double-buffering:
-    /// - All entities read from the "current" buffer (stable state from last tick)
-    /// - All entities write to the "next" buffer (new state for next tick)
-    /// - Processing order doesn't matter because reads always see the same values
-    /// - After all systems finish, swap buffers to make new state current
-    /// 
-    /// # Example
-    /// ```ignore
-    /// loop {
-    ///     // Systems read from "current" buffer, write to "next" buffer
-    ///     physics_system(&mut world, dt);
-    ///     collision_system(&mut world);
-    ///     
-    ///     // Make next buffer current for the next tick
-    ///     world.swap_buffers();
-    /// }
-    /// ```
-    pub fn swap_buffers(&mut self) {
-        for storage in self.storages.values_mut() {
-            storage.swap_buffers();
-        }
+        Ok(())
     }
 }
 
@@ -243,24 +348,3 @@ impl Default for World {
         Self::new()
     }
 }
-
-/// Convenience macro for spawning entities.
-/// 
-/// This provides a more ergonomic way to spawn entities with multiple components.
-/// 
-/// # Example
-/// ```ignore
-/// let entity = spawn!(world,
-///     Position { x: 1.0, y: 2.0 },
-///     Velocity { x: 0.5, y: 0.0 }
-/// );
-/// ```
-#[macro_export]
-macro_rules! spawn {
-    ($world:expr, $($comp:expr),+ $(,)?) => {{
-        let builder = $crate::ecs::EntityBuilder::new()
-            $(.with($comp))+;
-        $world.spawn(builder)
-    }};
-}
-

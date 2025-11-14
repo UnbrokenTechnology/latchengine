@@ -9,13 +9,22 @@
 //! and world management will be reintroduced in subsequent iterations.
 
 mod archetype;
+mod builder;
 mod component;
 mod entity;
+pub mod storage;
+mod world;
 
 pub use archetype::{ArchetypeId, ArchetypeLayout};
+pub use builder::{ComponentBytes, EntityBlueprint, EntityBuilder, EntityBuilderError};
 pub use component::{
     handle_of_name, meta_of, meta_of_name, register_component,
     register_external_component_with_fields, Component, ComponentHandle, ComponentId,
     ComponentMeta, FieldMeta, __ComponentOnceCell,
 };
 pub use entity::{Entity, EntityId, EntityLoc, Generation};
+pub use storage::{
+    plan_archetype, ArchetypePlan, ArchetypeStorage, ColumnError, PageBudget, PlanError,
+    StorageError,
+};
+pub use world::{World, WorldError};

@@ -4,13 +4,7 @@ use crate::{
 };
 use latch_env::memory::Memory;
 use std::{
-    collections::HashMap,
-    mem::MaybeUninit,
-    num::NonZeroUsize,
-    ops::Range,
-    ptr,
-    slice,
-    sync::Arc,
+    collections::HashMap, mem::MaybeUninit, num::NonZeroUsize, ops::Range, ptr, slice, sync::Arc,
 };
 use thiserror::Error;
 
@@ -62,21 +56,18 @@ pub fn plan_archetype(
     let mut bytes_per_row = std::mem::size_of::<EntityId>();
 
     for &component_id in layout.components() {
-        let meta = meta_of(component_id)
-            .ok_or(PlanError::ComponentNotRegistered { component_id })?;
+        let meta =
+            meta_of(component_id).ok_or(PlanError::ComponentNotRegistered { component_id })?;
         bytes_per_row = bytes_per_row
             .checked_add(meta.stride)
             .ok_or(PlanError::BytesPerRowOverflow)?;
-        columns.push(ColumnPlan {
-            component_id,
-            meta,
-        });
+        columns.push(ColumnPlan { component_id, meta });
     }
 
     let bytes_per_row = NonZeroUsize::new(bytes_per_row).ok_or(PlanError::BytesPerRowZero)?;
     let rows_per_page = compute_rows_per_page(bytes_per_row, budget.l2_bytes);
-    let rows_per_page = NonZeroUsize::new(rows_per_page)
-        .ok_or(PlanError::RowsPerPageZero { bytes_per_row })?;
+    let rows_per_page =
+        NonZeroUsize::new(rows_per_page).ok_or(PlanError::RowsPerPageZero { bytes_per_row })?;
     let page_bytes = rows_per_page
         .get()
         .checked_mul(bytes_per_row.get())
@@ -195,12 +186,19 @@ fn floor_power_of_two(value: usize) -> usize {
     1usize << highest_bit
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum PlanError {
+    #[error("component id {component_id} not registered")]
     ComponentNotRegistered { component_id: ComponentId },
+    #[error("bytes per row evaluated to zero")]
     BytesPerRowZero,
+    #[error("bytes per row overflowed usize::MAX")]
     BytesPerRowOverflow,
+    #[error("rows per page computed as zero (bytes_per_row={bytes_per_row})")]
     RowsPerPageZero { bytes_per_row: NonZeroUsize },
+    #[error(
+        "page byte budget overflow (rows_per_page={rows_per_page}, bytes_per_row={bytes_per_row})"
+    )]
     PageBytesOverflow {
         rows_per_page: NonZeroUsize,
         bytes_per_row: NonZeroUsize,
@@ -210,7 +208,11 @@ pub enum PlanError {
 #[derive(Debug, Error)]
 pub enum ColumnError {
     #[error("range [{start}, {end}) is out of bounds for len {len}")]
-    RangeOutOfBounds { start: usize, end: usize, len: usize },
+    RangeOutOfBounds {
+        start: usize,
+        end: usize,
+        len: usize,
+    },
     #[error("range [{start}, {end}) crosses page boundary (rows_per_page={rows_per_page})")]
     RangeCrossesPage {
         start: usize,
@@ -237,7 +239,6 @@ pub enum StorageError {
     NotEnoughEntities { expected: usize, got: usize },
 }
 
-#[derive(Debug)]
 pub struct ComponentColumn {
     plan: ColumnPlan,
     rows_per_page: usize,
@@ -344,10 +345,7 @@ impl ComponentColumn {
         Ok(self.nxt_pages[page_idx].slice_bytes_mut(local.start, local.len()))
     }
 
-    pub fn slice_rw(
-        &mut self,
-        range: Range<usize>,
-    ) -> Result<(&[u8], &mut [u8]), ColumnError> {
+    pub fn slice_rw(&mut self, range: Range<usize>) -> Result<(&[u8], &mut [u8]), ColumnError> {
         let (page_idx, local) = self.localize_range(range)?;
         let read = self.cur_pages[page_idx].slice_bytes(local.start, local.len());
         let write = self.nxt_pages[page_idx].slice_bytes_mut(local.start, local.len());
@@ -436,10 +434,22 @@ impl ComponentColumn {
     fn move_row(&mut self, from: usize, to: usize) -> Result<(), ColumnError> {
         let (from_page, from_local) = self.global_to_local(from)?;
         let (to_page, to_local) = self.global_to_local(to)?;
-        let cur_src = self.cur_pages[from_page].row_bytes(from_local);
-        self.cur_pages[to_page].write_row(to_local, cur_src);
-        let nxt_src = self.nxt_pages[from_page].row_bytes(from_local);
-        self.nxt_pages[to_page].write_row(to_local, nxt_src);
+        if from_page == to_page && from_local == to_local {
+            return Ok(());
+        }
+
+        let mut cur_tmp = vec![0u8; self.stride];
+        {
+            let src = self.cur_pages[from_page].row_bytes(from_local);
+            cur_tmp.copy_from_slice(src);
+        }
+        let mut nxt_tmp = vec![0u8; self.stride];
+        {
+            let src = self.nxt_pages[from_page].row_bytes(from_local);
+            nxt_tmp.copy_from_slice(src);
+        }
+        self.cur_pages[to_page].write_row(to_local, &cur_tmp);
+        self.nxt_pages[to_page].write_row(to_local, &nxt_tmp);
         Ok(())
     }
 
@@ -519,7 +529,6 @@ impl ComponentColumn {
     }
 }
 
-#[derive(Debug)]
 pub struct ArchetypeStorage {
     plan: Arc<ArchetypePlan>,
     entity_ids: PagedPool<EntityId>,
@@ -572,6 +581,26 @@ impl ArchetypeStorage {
         self.plan.rows_per_page.get()
     }
 
+    pub fn entity_id_at(&self, gidx: usize) -> Result<EntityId, StorageError> {
+        self.entity_ids
+            .get(gidx)
+            .map(|id| *id)
+            .map_err(StorageError::EntityPool)
+    }
+
+    pub fn entity_ids_slice(&self, range: Range<usize>) -> Result<&[EntityId], StorageError> {
+        self.entity_ids
+            .slice_tile(range)
+            .map_err(StorageError::EntityPool)
+    }
+
+    pub fn set_entity_id(&mut self, gidx: usize, entity_id: EntityId) -> Result<(), StorageError> {
+        self.entity_ids
+            .get_mut(gidx)
+            .map(|slot| *slot = entity_id)
+            .map_err(StorageError::EntityPool)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -596,6 +625,7 @@ impl ArchetypeStorage {
         }
         self.entity_ids.write_at(gidx, entity_id);
         self.len += 1;
+        debug_assert_eq!(self.len, self.entity_ids.len_total());
         Ok(gidx)
     }
 
@@ -624,6 +654,7 @@ impl ArchetypeStorage {
             debug_assert_eq!(spans, column_spans, "column bulk allocation mismatch");
         }
         self.len += count;
+        debug_assert_eq!(self.len, self.entity_ids.len_total());
         Ok(spans)
     }
 
@@ -684,6 +715,7 @@ impl ArchetypeStorage {
             on_move(from, to);
         }
         self.len -= 1;
+        debug_assert_eq!(self.len, self.entity_ids.len_total());
         Ok(())
     }
 
@@ -709,6 +741,7 @@ impl ArchetypeStorage {
             on_move(from, to);
         }
         self.len = self.entity_ids.len_total();
+        debug_assert_eq!(self.len, self.entity_ids.len_total());
         Ok(())
     }
 }

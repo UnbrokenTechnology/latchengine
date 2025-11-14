@@ -156,6 +156,36 @@ impl<T> PagedPool<T> {
         self.pages[pid].write_at(loc, value);
     }
 
+    pub fn get(&self, gidx: usize) -> Result<&T, PoolError> {
+        if gidx >= self.len_total() {
+            return Err(PoolError::IndexOutOfBounds {
+                index: gidx,
+                len: self.len_total(),
+            });
+        }
+        let pid = self.page_of(gidx);
+        let loc = self.local_of(gidx);
+        self.pages
+            .get(pid)
+            .ok_or(PoolError::PageMissing { page: pid })?
+            .get(loc)
+    }
+
+    pub fn get_mut(&mut self, gidx: usize) -> Result<&mut T, PoolError> {
+        if gidx >= self.len_total() {
+            return Err(PoolError::IndexOutOfBounds {
+                index: gidx,
+                len: self.len_total(),
+            });
+        }
+        let pid = self.page_of(gidx);
+        let loc = self.local_of(gidx);
+        self.pages
+            .get_mut(pid)
+            .ok_or(PoolError::PageMissing { page: pid })?
+            .get_mut(loc)
+    }
+
     #[inline]
     pub fn clamp_to_page(
         &self,

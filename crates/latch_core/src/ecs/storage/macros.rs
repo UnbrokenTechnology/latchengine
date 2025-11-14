@@ -32,10 +32,10 @@
 // ```
 
 /// Macro to get multiple immutable component slices from a storage.
-/// 
+///
 /// Reads from the "current" buffer (stable state from last tick).
 /// Handles any number of components using compile-time validation.
-/// 
+///
 /// # Example
 /// ```ignore
 /// let positions = columns!(storage, Position);
@@ -48,18 +48,18 @@ macro_rules! columns {
     ($storage:expr, $T:ty) => {
         $storage.column_as_slice::<$T>().unwrap()
     };
-    
+
     // Multiple components - use the general implementation
     ($storage:expr, $($T:ty),+ $(,)?) => {{
         // Get the current buffer index (what we read from)
         let current_buffer = $storage.current_buffer_index();
-        
+
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
             $storage.get_column_ptr_const(<$T as $crate::ecs::Component>::ID)
                 .expect("Component not found in archetype")
         }),+];
-        
+
         // SAFETY: Each column is independently readable, and the macro ensures
         // component types are distinct at compile time.
         unsafe {
@@ -76,10 +76,10 @@ macro_rules! columns {
 }
 
 /// Macro to get multiple mutable component slices from a storage.
-/// 
+///
 /// Writes to the "next" buffer (the one not currently being read from).
 /// Handles any number of components using compile-time validation.
-/// 
+///
 /// # Example
 /// ```ignore
 /// let positions = columns_mut!(storage, Position);
@@ -93,28 +93,28 @@ macro_rules! columns_mut {
     ($storage:expr, $T:ty) => {
         $storage.column_as_slice_mut::<$T>().unwrap()
     };
-    
+
     // Multiple components - use the general implementation
     ($storage:expr, $($T:ty),+ $(,)?) => {{
         // Collect component IDs and verify uniqueness at compile time
         let ids = [$(<$T as $crate::ecs::Component>::ID),+];
-        
+
         // Get the next buffer index (what we write to)
         let next_buffer = $storage.next_buffer_index();
-        
+
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
             $storage.get_column_ptr(<$T as $crate::ecs::Component>::ID)
                 .expect("Component not found in archetype")
         }),+];
-        
+
         // Runtime verification that all IDs are unique
         for i in 0..ids.len() {
             for j in (i+1)..ids.len() {
                 assert_ne!(ids[i], ids[j], "Cannot get multiple mutable references to the same component");
             }
         }
-        
+
         // SAFETY: We've verified all component IDs are unique, so these point to different columns.
         // Each column is independently mutable.
         unsafe {
