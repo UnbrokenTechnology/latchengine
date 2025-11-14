@@ -22,7 +22,10 @@ impl ArchetypeLayout {
         components.sort_unstable();
         components.dedup();
         let id = hash_components(&components);
-        Self { id, components: components.into_boxed_slice() }
+        Self {
+            id,
+            components: components.into_boxed_slice(),
+        }
     }
 
     #[inline]

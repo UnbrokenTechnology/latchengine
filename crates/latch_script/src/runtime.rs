@@ -37,12 +37,13 @@ impl ScriptRuntime {
 
     /// Call a JavaScript function by name with no arguments.
     pub fn call_function(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.context.with(|ctx| -> Result<(), Box<dyn std::error::Error>> {
-            let globals = ctx.globals();
-            let func: rquickjs::Function = globals.get(name)?;
-            func.call::<_, ()>(())?;
-            Ok(())
-        })?;
+        self.context
+            .with(|ctx| -> Result<(), Box<dyn std::error::Error>> {
+                let globals = ctx.globals();
+                let func: rquickjs::Function = globals.get(name)?;
+                func.call::<_, ()>(())?;
+                Ok(())
+            })?;
         Ok(())
     }
 }

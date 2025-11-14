@@ -29,9 +29,7 @@ impl Default for Settings {
                 resolution_height: 720,
                 fullscreen: false,
             },
-            audio: AudioSettings {
-                master_volume: 1.0,
-            },
+            audio: AudioSettings { master_volume: 1.0 },
         }
     }
 }

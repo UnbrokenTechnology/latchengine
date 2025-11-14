@@ -13,7 +13,7 @@ impl SystemProfiler {
             timings: HashMap::new(),
         }
     }
-    
+
     pub fn time_system<F, R>(&mut self, name: &str, f: F) -> R
     where
         F: FnOnce() -> R,
@@ -21,19 +21,22 @@ impl SystemProfiler {
         let start = Instant::now();
         let result = f();
         let elapsed = start.elapsed();
-        
-        *self.timings.entry(name.to_string()).or_insert(Duration::ZERO) += elapsed;
+
+        *self
+            .timings
+            .entry(name.to_string())
+            .or_insert(Duration::ZERO) += elapsed;
         result
     }
-    
+
     pub fn get_timing(&self, name: &str) -> Duration {
         self.timings.get(name).copied().unwrap_or(Duration::ZERO)
     }
-    
+
     pub fn reset(&mut self) {
         self.timings.clear();
     }
-    
+
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Duration)> {
         self.timings.iter()
     }

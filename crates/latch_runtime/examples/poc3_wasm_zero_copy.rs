@@ -108,13 +108,13 @@ impl SharedMemory {
     fn new(store: &mut Store<()>) -> Self {
         let memory_type = MemoryType::new(1, None); // 1 page = 64KB
         let memory = Memory::new(store, memory_type).unwrap();
-        
+
         Self {
             memory,
             _data: Arc::new(Vec::new()),
         }
     }
-    
+
     /// Write Rust slice into WASM memory at offset
     fn write_slice<T: Copy>(&mut self, store: &mut Store<()>, offset: usize, data: &[T]) {
         let bytes = unsafe {
@@ -125,7 +125,7 @@ impl SharedMemory {
         };
         self.memory.write(store, offset, bytes).unwrap();
     }
-    
+
     /// Read from WASM memory back into Rust slice
     fn read_slice<T: Copy>(&self, store: &Store<()>, offset: usize, data: &mut [T]) {
         let bytes = unsafe {
@@ -149,56 +149,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  (same bytes, zero copy!)\n");
 
     let mut world = World::new();
-    
+
     Position::ensure_registered();
     Velocity::ensure_registered();
 
     println!("1. Spawning 1000 entities...");
-    
+
     for i in 0..1000 {
         let x = i * 10;
         let y = i * 20;
         let vx = if i % 2 == 0 { 100 } else { -100 };
-        
-        world.spawn(EntityBuilder::new()
-            .with(Position { x, y })
-            .with(Velocity { x: vx, y: 100 }));
+
+        world.spawn(
+            EntityBuilder::new()
+                .with(Position { x, y })
+                .with(Velocity { x: vx, y: 100 }),
+        );
     }
     println!("   ✓ Spawned 1000 entities\n");
 
     println!("2. Setting up WASM runtime with shared memory...");
-    
+
     // Create WASM engine and store
     let engine = Engine::default();
     let mut store = Store::new(&engine, ());
-    
+
     // Create shared memory
     let mut shared_mem = SharedMemory::new(&mut store);
-    
+
     // Parse WASM module
     let module = Module::new(&engine, WASM_MODULE.as_bytes())?;
-    
+
     // Link the shared memory
     let mut linker = <Linker<()>>::new(&engine);
     linker.define("env", "memory", shared_mem.memory)?;
-    
+
     // Instantiate
-    let instance = linker.instantiate(&mut store, &module)?.ensure_no_start(&mut store)?;
-    
+    let instance = linker
+        .instantiate(&mut store, &module)?
+        .ensure_no_start(&mut store)?;
+
     println!("   ✓ WASM module loaded with shared memory\n");
 
     println!("3. Calling WASM system (zero-copy update)...");
-    
+
     // Get component data from ECS using the new API
     let mut entities: Vec<(Position, Velocity)> = Vec::new();
-    
+
     // Find all archetypes with both Position and Velocity
     let archetypes = world.archetypes_with_all(&[Position::ID, Velocity::ID]);
     for arch_id in archetypes {
         if let Some(storage) = world.archetype_storage(arch_id) {
             if let (Some(positions), Some(velocities)) = (
                 storage.column_as_slice::<Position>(),
-                storage.column_as_slice::<Velocity>()
+                storage.column_as_slice::<Velocity>(),
             ) {
                 for i in 0..positions.len() {
                     entities.push((positions[i], velocities[i]));
@@ -206,40 +210,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     let count = entities.len();
-    
+
     // Pack into contiguous buffers
     let mut positions: Vec<Position> = entities.iter().map(|(p, _)| *p).collect();
     let velocities: Vec<Velocity> = entities.iter().map(|(_, v)| *v).collect();
-    
+
     // Write to shared memory
     let pos_offset = 0;
     let vel_offset = count * std::mem::size_of::<Position>();
-    
+
     shared_mem.write_slice(&mut store, pos_offset, &positions);
     shared_mem.write_slice(&mut store, vel_offset, &velocities);
-    
-    println!("   Wrote {} positions and velocities to shared memory", count);
-    println!("   Position offset: {}, Velocity offset: {}", pos_offset, vel_offset);
-    
+
+    println!(
+        "   Wrote {} positions and velocities to shared memory",
+        count
+    );
+    println!(
+        "   Position offset: {}, Velocity offset: {}",
+        pos_offset, vel_offset
+    );
+
     // Call WASM function
-    let update_fn = instance.get_typed_func::<(i32, i32, i32, f32), ()>(&store, "updatePositions")?;
-    
+    let update_fn =
+        instance.get_typed_func::<(i32, i32, i32, f32), ()>(&store, "updatePositions")?;
+
     let dt = 0.016f32;
-    update_fn.call(&mut store, (pos_offset as i32, vel_offset as i32, count as i32, dt))?;
-    
+    update_fn.call(
+        &mut store,
+        (pos_offset as i32, vel_offset as i32, count as i32, dt),
+    )?;
+
     println!("   ✓ WASM modified memory directly (zero-copy!)\n");
-    
+
     // Read back modified data
     shared_mem.read_slice(&store, pos_offset, &mut positions);
-    
+
     println!("4. Verifying results...\n");
-    
+
     for i in 0..5.min(count) {
-        println!("   Entity {}: pos=({:.7}, {:.7})", i, positions[i].x, positions[i].y);
+        println!(
+            "   Entity {}: pos=({:.7}, {:.7})",
+            i, positions[i].x, positions[i].y
+        );
     }
-    
+
     println!("\n=== PoC 4 Complete! ===\n");
     println!("What we proved:");
     println!("  ✅ WASM can access Rust memory directly");
@@ -255,6 +272,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  3. Engine injects helper functions (Vec2, etc.)");
     println!("  4. Runtime maps component slices → WASM memory");
     println!("  5. Profit! 🚀");
-    
+
     Ok(())
 }

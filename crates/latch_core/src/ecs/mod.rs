@@ -14,16 +14,8 @@ mod entity;
 
 pub use archetype::{ArchetypeId, ArchetypeLayout};
 pub use component::{
-	handle_of_name,
-	meta_of,
-	meta_of_name,
-	register_component,
-	register_external_component_with_fields,
-	Component,
-	ComponentHandle,
-	ComponentId,
-	ComponentMeta,
-	FieldMeta,
-	__ComponentOnceCell,
+    handle_of_name, meta_of, meta_of_name, register_component,
+    register_external_component_with_fields, Component, ComponentHandle, ComponentId,
+    ComponentMeta, FieldMeta, __ComponentOnceCell,
 };
 pub use entity::{Entity, EntityId, EntityLoc, Generation};

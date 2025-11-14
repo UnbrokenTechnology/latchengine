@@ -15,44 +15,48 @@ pub type Generation = u32;
 pub struct Entity(u64);
 
 impl Entity {
-	const INDEX_BITS: u64 = 32;
-	const INDEX_MASK: u64 = (1u64 << Self::INDEX_BITS) - 1;
+    const INDEX_BITS: u64 = 32;
+    const INDEX_MASK: u64 = (1u64 << Self::INDEX_BITS) - 1;
 
-	#[inline]
-	pub fn new(index: EntityId, generation: Generation) -> Self {
-	let index_part = index as u64 & Self::INDEX_MASK;
-	let gen_part = (generation as u64) << Self::INDEX_BITS;
-		Self(gen_part | index_part)
-	}
-	#[inline]
-	pub fn index(self) -> EntityId {
-		(self.0 & Self::INDEX_MASK) as EntityId
-	}
-	#[inline]
-	pub fn generation(self) -> Generation {
-		(self.0 >> Self::INDEX_BITS) as Generation
-	}
-	#[inline]
-	pub fn to_bits(self) -> u64 {
-		self.0
-	}
-	#[inline]
-	pub fn from_bits(bits: u64) -> Self {
-		Self(bits)
-	}
+    #[inline]
+    pub fn new(index: EntityId, generation: Generation) -> Self {
+        let index_part = index as u64 & Self::INDEX_MASK;
+        let gen_part = (generation as u64) << Self::INDEX_BITS;
+        Self(gen_part | index_part)
+    }
+    #[inline]
+    pub fn index(self) -> EntityId {
+        (self.0 & Self::INDEX_MASK) as EntityId
+    }
+    #[inline]
+    pub fn generation(self) -> Generation {
+        (self.0 >> Self::INDEX_BITS) as Generation
+    }
+    #[inline]
+    pub fn to_bits(self) -> u64 {
+        self.0
+    }
+    #[inline]
+    pub fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
 }
 
 /// Location of a live entity inside world storage.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct EntityLoc {
-	pub archetype: ArchetypeId,
-	pub index: usize,
-	pub generation: Generation,
+    pub archetype: ArchetypeId,
+    pub index: usize,
+    pub generation: Generation,
 }
 
 impl EntityLoc {
-	#[inline]
-	pub fn new(archetype: ArchetypeId, index: usize, generation: Generation) -> Self {
-		Self { archetype, index, generation }
-	}
+    #[inline]
+    pub fn new(archetype: ArchetypeId, index: usize, generation: Generation) -> Self {
+        Self {
+            archetype,
+            index,
+            generation,
+        }
+    }
 }

@@ -8,11 +8,7 @@
 use once_cell::sync::OnceCell;
 
 pub use once_cell::sync::OnceCell as __ComponentOnceCell;
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::RwLock,
-};
+use std::{collections::HashMap, fmt, sync::RwLock};
 
 /// Unique identifier assigned to each registered component.
 pub type ComponentId = u32;
@@ -28,7 +24,11 @@ pub struct FieldMeta {
 impl FieldMeta {
     #[inline]
     pub fn new(name: impl Into<Box<str>>, offset: usize, size: usize) -> Self {
-        Self { name: name.into(), offset, size }
+        Self {
+            name: name.into(),
+            offset,
+            size,
+        }
     }
 }
 
@@ -90,8 +90,20 @@ fn registry_mut() -> std::sync::RwLockWriteGuard<'static, Registry> {
         .expect("component registry poisoned")
 }
 
-fn validate_layout(meta: &ComponentMeta, size: usize, align: usize, stride: usize, pod: bool, fields: &[FieldMeta]) {
-    if meta.size != size || meta.align != align || meta.stride != stride || meta.pod != pod || meta.fields.as_ref() != fields {
+fn validate_layout(
+    meta: &ComponentMeta,
+    size: usize,
+    align: usize,
+    stride: usize,
+    pod: bool,
+    fields: &[FieldMeta],
+) {
+    if meta.size != size
+        || meta.align != align
+        || meta.stride != stride
+        || meta.pod != pod
+        || meta.fields.as_ref() != fields
+    {
         panic!(
             "component '{}' registered with conflicting layout",
             meta.name
@@ -107,13 +119,22 @@ fn register_internal(
     pod: bool,
     fields: Vec<FieldMeta>,
 ) -> ComponentHandle {
-    assert!(align.is_power_of_two(), "component alignment must be power-of-two");
+    assert!(
+        align.is_power_of_two(),
+        "component alignment must be power-of-two"
+    );
     assert!(stride >= size, "stride must be >= size");
-    assert!(stride % align == 0, "stride must be a multiple of alignment");
+    assert!(
+        stride % align == 0,
+        "stride must be a multiple of alignment"
+    );
 
     let mut reg = registry_mut();
     if let Some(&id) = reg.by_name.get(name) {
-        let existing = reg.by_id.get(&id).expect("registry missing component metadata");
+        let existing = reg
+            .by_id
+            .get(&id)
+            .expect("registry missing component metadata");
         validate_layout(existing, size, align, stride, pod, &fields);
         return existing.handle();
     }
@@ -173,7 +194,12 @@ pub fn meta_of_name(name: &str) -> Option<ComponentMeta> {
     REGISTRY
         .get()
         .and_then(|lock| lock.read().ok())
-        .and_then(|reg| reg.by_name.get(name).and_then(|id| reg.by_id.get(id)).cloned())
+        .and_then(|reg| {
+            reg.by_name
+                .get(name)
+                .and_then(|id| reg.by_id.get(id))
+                .cloned()
+        })
 }
 
 /// Resolve a handle by name, panicking if not registered.
@@ -205,7 +231,14 @@ pub trait Component: 'static + Send + Sync {
         let size = std::mem::size_of::<Self>();
         let align = std::mem::align_of::<Self>();
         let stride = size.next_multiple_of(align);
-        register_component(Self::NAME, size, align, stride, Self::is_pod(), Self::fields())
+        register_component(
+            Self::NAME,
+            size,
+            align,
+            stride,
+            Self::is_pod(),
+            Self::fields(),
+        )
     }
 
     /// Lazy component handle registration.
@@ -240,7 +273,9 @@ macro_rules! define_component {
             const NAME: &'static str = $name;
 
             fn handle() -> $crate::ecs::ComponentHandle {
-                static HANDLE: $crate::ecs::component::__ComponentOnceCell<$crate::ecs::ComponentHandle> = $crate::ecs::component::__ComponentOnceCell::new();
+                static HANDLE: $crate::ecs::component::__ComponentOnceCell<
+                    $crate::ecs::ComponentHandle,
+                > = $crate::ecs::component::__ComponentOnceCell::new();
                 *HANDLE.get_or_init(|| {
                     let size = std::mem::size_of::<$ty>();
                     let align = std::mem::align_of::<$ty>();
@@ -254,12 +289,9 @@ macro_rules! define_component {
                         <$ty as $crate::ecs::Component>::fields(),
                     );
                     debug_assert_eq!(
-                        handle.id,
-                        $id,
+                        handle.id, $id,
                         "component '{}' registered with id {} but expected {}",
-                        $name,
-                        handle.id,
-                        $id,
+                        $name, handle.id, $id,
                     );
                     handle
                 })

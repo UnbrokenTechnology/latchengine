@@ -33,7 +33,7 @@ pub fn window_attributes(config: WindowConfig) -> winit::window::WindowAttribute
 }
 
 /// Helper to create a window within the event loop (winit 0.30+ API)
-/// 
+///
 /// Note: In winit 0.30+, windows must be created inside the `resumed` event.
 /// This is a helper that provides the old-style API for simple cases.
 /// For production use, implement ApplicationHandler trait directly.

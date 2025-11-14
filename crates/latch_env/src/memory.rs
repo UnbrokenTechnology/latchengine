@@ -35,27 +35,35 @@ impl Memory {
 #[cfg(target_os = "windows")]
 fn cache_line_size() -> Option<usize> {
     use windows_sys::Win32::System::SystemInformation::{
-        GetLogicalProcessorInformation, SYSTEM_LOGICAL_PROCESSOR_INFORMATION, RelationCache,
-        CACHE_DESCRIPTOR, PROCESSOR_CACHE_TYPE, CacheData,
+        CacheData, GetLogicalProcessorInformation, RelationCache, CACHE_DESCRIPTOR,
+        PROCESSOR_CACHE_TYPE, SYSTEM_LOGICAL_PROCESSOR_INFORMATION,
     };
     unsafe {
         let mut len = 0u32;
         GetLogicalProcessorInformation(std::ptr::null_mut(), &mut len);
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
         let count = len as usize / std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
         let mut buf = vec![SYSTEM_LOGICAL_PROCESSOR_INFORMATION::default(); count];
-        if GetLogicalProcessorInformation(buf.as_mut_ptr(), &mut len) == 0 { return None; }
+        if GetLogicalProcessorInformation(buf.as_mut_ptr(), &mut len) == 0 {
+            return None;
+        }
         for rec in &buf {
             if rec.Relationship == RelationCache {
                 let c: CACHE_DESCRIPTOR = unsafe { rec.Anonymous.Cache };
-                if c.Level == 1 && c.Type as u32 == CacheData { return Some(c.LineSize as usize); }
+                if c.Level == 1 && c.Type as u32 == CacheData {
+                    return Some(c.LineSize as usize);
+                }
             }
         }
         // fallback: any data cache line size
         for rec in &buf {
             if rec.Relationship == RelationCache {
                 let c: CACHE_DESCRIPTOR = unsafe { rec.Anonymous.Cache };
-                if c.Type as u32 == CacheData { return Some(c.LineSize as usize); }
+                if c.Type as u32 == CacheData {
+                    return Some(c.LineSize as usize);
+                }
             }
         }
         None
@@ -64,38 +72,57 @@ fn cache_line_size() -> Option<usize> {
 #[cfg(target_os = "windows")]
 fn cache_size_by_level(level: u8) -> Option<usize> {
     use windows_sys::Win32::System::SystemInformation::{
-        GetLogicalProcessorInformation, SYSTEM_LOGICAL_PROCESSOR_INFORMATION, RelationCache,
-        CACHE_DESCRIPTOR, PROCESSOR_CACHE_TYPE, CacheData,
+        CacheData, GetLogicalProcessorInformation, RelationCache, CACHE_DESCRIPTOR,
+        PROCESSOR_CACHE_TYPE, SYSTEM_LOGICAL_PROCESSOR_INFORMATION,
     };
     unsafe {
         let mut len = 0u32;
         GetLogicalProcessorInformation(std::ptr::null_mut(), &mut len);
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
         let count = len as usize / std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
         let mut buf = vec![SYSTEM_LOGICAL_PROCESSOR_INFORMATION::default(); count];
-        if GetLogicalProcessorInformation(buf.as_mut_ptr(), &mut len) == 0 { return None; }
+        if GetLogicalProcessorInformation(buf.as_mut_ptr(), &mut len) == 0 {
+            return None;
+        }
         for rec in &buf {
             if rec.Relationship == RelationCache {
                 let c: CACHE_DESCRIPTOR = unsafe { rec.Anonymous.Cache };
-                if c.Type as u32 == CacheData && c.Level == level { return Some(c.Size as usize); }
+                if c.Type as u32 == CacheData && c.Level == level {
+                    return Some(c.Size as usize);
+                }
             }
         }
         None
     }
 }
 #[cfg(target_os = "windows")]
-fn l1_size() -> Option<usize> { cache_size_by_level(1) }
+fn l1_size() -> Option<usize> {
+    cache_size_by_level(1)
+}
 #[cfg(target_os = "windows")]
-fn l2_size() -> Option<usize> { cache_size_by_level(2) }
+fn l2_size() -> Option<usize> {
+    cache_size_by_level(2)
+}
 #[cfg(target_os = "windows")]
-fn l3_size() -> Option<usize> { cache_size_by_level(3) }
+fn l3_size() -> Option<usize> {
+    cache_size_by_level(3)
+}
 
 #[cfg(target_os = "windows")]
 fn total_ram_bytes() -> Option<u64> {
     use windows_sys::Win32::System::Memory::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     unsafe {
-        let mut st = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
-        if GlobalMemoryStatusEx(&mut st) != 0 { Some(st.ullTotalPhys as u64) } else { None }
+        let mut st = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        if GlobalMemoryStatusEx(&mut st) != 0 {
+            Some(st.ullTotalPhys as u64)
+        } else {
+            None
+        }
     }
 }
 
@@ -107,8 +134,20 @@ fn sysctl_usize(name: &str) -> Option<usize> {
     let cname = std::ffi::CString::new(name).ok()?;
     let mut val: usize = 0;
     let mut len: size_t = std::mem::size_of::<usize>() as _;
-    let rc = unsafe { sysctlbyname(cname.as_ptr(), &mut val as *mut _ as *mut c_void, &mut len, std::ptr::null_mut(), 0) };
-    if rc == 0 && val != 0 { Some(val) } else { None }
+    let rc = unsafe {
+        sysctlbyname(
+            cname.as_ptr(),
+            &mut val as *mut _ as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && val != 0 {
+        Some(val)
+    } else {
+        None
+    }
 }
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn sysctl_u64(name: &str) -> Option<u64> {
@@ -116,19 +155,41 @@ fn sysctl_u64(name: &str) -> Option<u64> {
     let cname = std::ffi::CString::new(name).ok()?;
     let mut val: u64 = 0;
     let mut len: size_t = std::mem::size_of::<u64>() as _;
-    let rc = unsafe { sysctlbyname(cname.as_ptr(), &mut val as *mut _ as *mut c_void, &mut len, std::ptr::null_mut(), 0) };
-    if rc == 0 && val != 0 { Some(val) } else { None }
+    let rc = unsafe {
+        sysctlbyname(
+            cname.as_ptr(),
+            &mut val as *mut _ as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && val != 0 {
+        Some(val)
+    } else {
+        None
+    }
 }
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn cache_line_size() -> Option<usize> { sysctl_usize("hw.cachelinesize") }
+fn cache_line_size() -> Option<usize> {
+    sysctl_usize("hw.cachelinesize")
+}
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn l1_size() -> Option<usize> { sysctl_usize("hw.l1dcachesize") }
+fn l1_size() -> Option<usize> {
+    sysctl_usize("hw.l1dcachesize")
+}
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn l2_size() -> Option<usize> { sysctl_usize("hw.l2cachesize") }
+fn l2_size() -> Option<usize> {
+    sysctl_usize("hw.l2cachesize")
+}
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn l3_size() -> Option<usize> { sysctl_usize("hw.l3cachesize") }
+fn l3_size() -> Option<usize> {
+    sysctl_usize("hw.l3cachesize")
+}
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn total_ram_bytes() -> Option<u64> { sysctl_u64("hw.memsize") }
+fn total_ram_bytes() -> Option<u64> {
+    sysctl_u64("hw.memsize")
+}
 
 /* --------------------- Linux / Android --------------------- */
 
@@ -146,7 +207,7 @@ fn parse_size_token(s: &str) -> Option<usize> {
         "K" => 1024,
         "M" => 1024 * 1024,
         "G" => 1024 * 1024 * 1024,
-        ""  => 1,
+        "" => 1,
         _ => return None,
     };
     Some(n * mult)
@@ -155,10 +216,20 @@ fn parse_size_token(s: &str) -> Option<usize> {
 fn cache_line_size() -> Option<usize> {
     // Try coherency_line_size from any data cache
     for i in 0..8 {
-        let typ = read_to_string(format!("/sys/devices/system/cpu/cpu0/cache/index{}/type", i))?;
+        let typ = read_to_string(format!(
+            "/sys/devices/system/cpu/cpu0/cache/index{}/type",
+            i
+        ))?;
         if typ.trim() == "Data" {
-            if let Some(s) = read_to_string(format!("/sys/devices/system/cpu/cpu0/cache/index{}/coherency_line_size", i)) {
-                if let Ok(n) = s.trim().parse::<usize>() { if n > 0 { return Some(n); } }
+            if let Some(s) = read_to_string(format!(
+                "/sys/devices/system/cpu/cpu0/cache/index{}/coherency_line_size",
+                i
+            )) {
+                if let Ok(n) = s.trim().parse::<usize>() {
+                    if n > 0 {
+                        return Some(n);
+                    }
+                }
             }
         }
     }
@@ -167,22 +238,39 @@ fn cache_line_size() -> Option<usize> {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn cache_size_by_level(level: &str) -> Option<usize> {
     for i in 0..8 {
-        let typ = read_to_string(format!("/sys/devices/system/cpu/cpu0/cache/index{}/type", i))?;
-        let lev = read_to_string(format!("/sys/devices/system/cpu/cpu0/cache/index{}/level", i))?;
+        let typ = read_to_string(format!(
+            "/sys/devices/system/cpu/cpu0/cache/index{}/type",
+            i
+        ))?;
+        let lev = read_to_string(format!(
+            "/sys/devices/system/cpu/cpu0/cache/index{}/level",
+            i
+        ))?;
         if typ.trim() == "Data" && lev.trim() == level {
-            if let Some(s) = read_to_string(format!("/sys/devices/system/cpu/cpu0/cache/index{}/size", i)) {
-                if let Some(n) = parse_size_token(&s) { return Some(n); }
+            if let Some(s) = read_to_string(format!(
+                "/sys/devices/system/cpu/cpu0/cache/index{}/size",
+                i
+            )) {
+                if let Some(n) = parse_size_token(&s) {
+                    return Some(n);
+                }
             }
         }
     }
     None
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn l1_size() -> Option<usize> { cache_size_by_level("1") }
+fn l1_size() -> Option<usize> {
+    cache_size_by_level("1")
+}
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn l2_size() -> Option<usize> { cache_size_by_level("2") }
+fn l2_size() -> Option<usize> {
+    cache_size_by_level("2")
+}
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn l3_size() -> Option<usize> { cache_size_by_level("3") }
+fn l3_size() -> Option<usize> {
+    cache_size_by_level("3")
+}
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn total_ram_bytes() -> Option<u64> {
@@ -207,7 +295,9 @@ fn total_ram_bytes() -> Option<u64> {
     target_os = "linux",
     target_os = "android"
 )))]
-fn cache_line_size() -> Option<usize> { None }
+fn cache_line_size() -> Option<usize> {
+    None
+}
 #[cfg(not(any(
     target_os = "windows",
     target_os = "macos",
@@ -215,7 +305,9 @@ fn cache_line_size() -> Option<usize> { None }
     target_os = "linux",
     target_os = "android"
 )))]
-fn l1_size() -> Option<usize> { None }
+fn l1_size() -> Option<usize> {
+    None
+}
 #[cfg(not(any(
     target_os = "windows",
     target_os = "macos",
@@ -223,7 +315,9 @@ fn l1_size() -> Option<usize> { None }
     target_os = "linux",
     target_os = "android"
 )))]
-fn l2_size() -> Option<usize> { None }
+fn l2_size() -> Option<usize> {
+    None
+}
 #[cfg(not(any(
     target_os = "windows",
     target_os = "macos",
@@ -231,7 +325,9 @@ fn l2_size() -> Option<usize> { None }
     target_os = "linux",
     target_os = "android"
 )))]
-fn l3_size() -> Option<usize> { None }
+fn l3_size() -> Option<usize> {
+    None
+}
 #[cfg(not(any(
     target_os = "windows",
     target_os = "macos",
@@ -239,4 +335,6 @@ fn l3_size() -> Option<usize> { None }
     target_os = "linux",
     target_os = "android"
 )))]
-fn total_ram_bytes() -> Option<u64> { None }
+fn total_ram_bytes() -> Option<u64> {
+    None
+}

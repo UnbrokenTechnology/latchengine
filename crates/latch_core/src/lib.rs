@@ -6,11 +6,11 @@
 //! - Deterministic time and math
 //! - Memory management
 
-pub mod pool;
 pub mod ecs;
-pub mod time;
 pub mod math;
 pub mod memory;
+pub mod pool;
+pub mod time;
 
 // Re-export metrics from latch_metrics for convenience
 #[cfg(feature = "metrics")]

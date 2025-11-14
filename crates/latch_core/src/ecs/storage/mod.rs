@@ -5,3 +5,4 @@ mod column;
 mod macros;
 
 pub use archetype_storage::ArchetypeStorage;
+pub use column::Column;

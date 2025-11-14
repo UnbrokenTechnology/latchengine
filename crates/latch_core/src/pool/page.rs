@@ -9,8 +9,13 @@ pub struct Page<T> {
 impl<T> Page<T> {
     pub fn with_capacity(rows: usize) -> Self {
         let mut vec: Vec<MaybeUninit<T>> = Vec::with_capacity(rows);
-        unsafe { vec.set_len(rows); }
-        Self { buf: vec.into_boxed_slice(), len: 0 }
+        unsafe {
+            vec.set_len(rows);
+        }
+        Self {
+            buf: vec.into_boxed_slice(),
+            len: 0,
+        }
     }
 
     #[inline]
@@ -54,16 +59,15 @@ impl<T> Page<T> {
     #[inline]
     pub fn write_at(&mut self, idx: usize, val: T) {
         debug_assert!(idx < self.len);
-        unsafe { ptr::write(self.buf[idx].as_mut_ptr(), val); }
+        unsafe {
+            ptr::write(self.buf[idx].as_mut_ptr(), val);
+        }
     }
 
     pub fn slice(&self, range: Range<usize>) -> Result<&[T], PoolError> {
         ensure_range(range.clone(), self.len)?;
         Ok(unsafe {
-            std::slice::from_raw_parts(
-                self.buf.as_ptr().add(range.start) as *const T,
-                range.len(),
-            )
+            std::slice::from_raw_parts(self.buf.as_ptr().add(range.start) as *const T, range.len())
         })
     }
 
@@ -79,7 +83,10 @@ impl<T> Page<T> {
 
     pub fn free_one(&mut self, idx: usize) -> Result<Option<(usize, usize)>, PoolError> {
         if idx >= self.len {
-            return Err(PoolError::IndexOutOfBounds { index: idx, len: self.len });
+            return Err(PoolError::IndexOutOfBounds {
+                index: idx,
+                len: self.len,
+            });
         }
         let last = self.len - 1;
         unsafe {

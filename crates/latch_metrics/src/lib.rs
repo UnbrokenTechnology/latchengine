@@ -23,20 +23,20 @@
 //! is compiled out to zero overhead.
 
 #[cfg(feature = "metrics")]
+mod counter;
+#[cfg(feature = "metrics")]
 mod frame_timer;
 #[cfg(feature = "metrics")]
 mod ring_buffer;
 #[cfg(feature = "metrics")]
-mod counter;
-#[cfg(feature = "metrics")]
 mod system_profiler;
 
+#[cfg(feature = "metrics")]
+pub use counter::Counter;
 #[cfg(feature = "metrics")]
 pub use frame_timer::FrameTimer;
 #[cfg(feature = "metrics")]
 pub use ring_buffer::RingBuffer;
-#[cfg(feature = "metrics")]
-pub use counter::Counter;
 #[cfg(feature = "metrics")]
 pub use system_profiler::SystemProfiler;
 
@@ -79,11 +79,17 @@ pub struct FrameTimer;
 
 #[cfg(not(feature = "metrics"))]
 impl FrameTimer {
-    pub fn new(_capacity: usize) -> Self { Self }
+    pub fn new(_capacity: usize) -> Self {
+        Self
+    }
     pub fn begin(&mut self) {}
     pub fn end(&mut self) {}
-    pub fn fps(&self) -> f64 { 0.0 }
-    pub fn frame_time_ms(&self) -> f64 { 0.0 }
+    pub fn fps(&self) -> f64 {
+        0.0
+    }
+    pub fn frame_time_ms(&self) -> f64 {
+        0.0
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -91,9 +97,16 @@ pub struct RingBuffer<T>(std::marker::PhantomData<T>);
 
 #[cfg(not(feature = "metrics"))]
 impl<T> RingBuffer<T> {
-    pub fn new(_capacity: usize) -> Self { Self(std::marker::PhantomData) }
+    pub fn new(_capacity: usize) -> Self {
+        Self(std::marker::PhantomData)
+    }
     pub fn push(&mut self, _value: T) {}
-    pub fn average(&self) -> T where T: Default { T::default() }
+    pub fn average(&self) -> T
+    where
+        T: Default,
+    {
+        T::default()
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -101,9 +114,13 @@ pub struct Counter;
 
 #[cfg(not(feature = "metrics"))]
 impl Counter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
     pub fn increment(&mut self, _name: &str, _value: usize) {}
-    pub fn get(&self, _name: &str) -> usize { 0 }
+    pub fn get(&self, _name: &str) -> usize {
+        0
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -111,9 +128,18 @@ pub struct SystemProfiler;
 
 #[cfg(not(feature = "metrics"))]
 impl SystemProfiler {
-    pub fn new() -> Self { Self }
-    pub fn time_system<F, R>(&mut self, _name: &str, f: F) -> R where F: FnOnce() -> R { f() }
-    pub fn get_timing(&self, _name: &str) -> std::time::Duration { std::time::Duration::ZERO }
+    pub fn new() -> Self {
+        Self
+    }
+    pub fn time_system<F, R>(&mut self, _name: &str, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        f()
+    }
+    pub fn get_timing(&self, _name: &str) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 }
 
 #[cfg(test)]
