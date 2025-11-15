@@ -91,7 +91,13 @@ impl PhysicsSystem {
     fn run(&mut self, world: &mut World, queries: &QueryRegistry, _dt: f32) {
         const GRAVITY: i16 = -50; // Downward acceleration
         const PARTICLE_RADIUS: i32 = 30_000; // 0.3 meters in units
-        const MIN_SEPARATION: i32 = PARTICLE_RADIUS * 2;
+        // Reduce query radius - we only need to check immediate neighbors, not ALL particles within 0.6m
+        const QUERY_RADIUS: i32 = PARTICLE_RADIUS; // Just check within particle radius (0.3m)
+
+        use std::cell::Cell;
+        let total_queries = Cell::new(0);
+        let total_neighbors_found = Cell::new(0);
+        let max_neighbors = Cell::new(0);
 
         world.for_each(&self.component_filter, |storage| {
             let (pos_col, vel_col) = storage
@@ -130,8 +136,12 @@ impl PhysicsSystem {
                     // Note: This queries the spatial hash which reflects the PREVIOUS frame's positions
                     // This is acceptable for soft-body physics and avoids borrowing issues
                     if let Some(spatial_hash) = queries.get(Position::ID) {
-                        let query_params = query_params_radius(new_x, new_y, MIN_SEPARATION);
+                        let query_params = query_params_radius(new_x, new_y, QUERY_RADIUS);
                         let nearby = spatial_hash.query(&query_params);
+
+                        total_queries.set(total_queries.get() + 1);
+                        total_neighbors_found.set(total_neighbors_found.get() + nearby.len());
+                        max_neighbors.set(max_neighbors.get().max(nearby.len()));
 
                         if nearby.len() > 1 {
                             // Has nearby particles (>1 because it includes self)
@@ -166,6 +176,15 @@ impl PhysicsSystem {
                 }
             }
         });
+
+        let num_queries = total_queries.get();
+        if num_queries > 0 {
+            let avg_neighbors = total_neighbors_found.get() as f64 / num_queries as f64;
+            println!(
+                "Query stats: {} queries, avg {:.1} neighbors/query, max {} neighbors",
+                num_queries, avg_neighbors, max_neighbors.get()
+            );
+        }
     }
 }
 
@@ -529,14 +548,15 @@ impl App {
         let mut world = World::new();
 
         // Spawn sand particles in a pile at the top
-        let num_particles = 10_000;
+        // Reduce count to demonstrate query system performance with reasonable density
+        let num_particles = 1_000;
         for i in 0..num_particles {
             // Distribute particles in a rectangular region at the top
-            let cols = 100;
+            let cols = 50; // Spread them out more
             let row = i / cols;
             let col = i % cols;
 
-            let spacing = 60_000; // 0.6 meters
+            let spacing = 100_000; // 1.0 meter spacing - more spread out
             let start_x = -(cols as i32 * spacing) / 2;
             let start_y = UNITS_PER_NDC - (row as i32 * spacing);
 
@@ -562,7 +582,9 @@ impl App {
 
         // Create spatial hash grid for position queries
         let mut queries = QueryRegistry::new();
-        let spatial_config = SpatialHashConfig::new(Position::ID, 100_000); // 1 meter cells
+        // Cell size should match query radius for optimal performance
+        // With 1m spacing and 0.3m query radius, 0.6m cells work well
+        let spatial_config = SpatialHashConfig::new(Position::ID, 60_000); // 0.6 meter cells
         let spatial_hash = Box::new(SpatialHashGrid::new(spatial_config));
         queries.register(Position::ID, spatial_hash);
 
