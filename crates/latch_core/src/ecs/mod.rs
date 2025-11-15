@@ -12,6 +12,7 @@ mod archetype;
 mod builder;
 mod component;
 mod entity;
+pub mod query;
 mod system_descriptor;
 mod system_handle;
 mod system_registration_error;
@@ -27,6 +28,10 @@ pub use component::{
     ComponentMeta, FieldMeta, __ComponentOnceCell,
 };
 pub use entity::{Entity, EntityId, EntityLoc, Generation};
+pub use query::{
+    query_params_radius, QueryAccelerator, QueryRegistry, QueryResult, SpatialHashConfig,
+    SpatialHashGrid,
+};
 pub use system_descriptor::SystemDescriptor;
 pub use system_handle::SystemHandle;
 pub use system_registration_error::SystemRegistrationError;

@@ -1,8 +1,8 @@
 use crate::ecs::{
     storage::{plan_archetype, ArchetypeStorage, PageBudget, PlanError, StorageError},
     ArchetypeId, ArchetypeLayout, Component, ComponentId, Entity, EntityBuilder,
-    EntityBuilderError, EntityId, EntityLoc, Generation, SystemDescriptor, SystemHandle,
-    SystemRegistrationError, SystemRegistry,
+    EntityBuilderError, EntityId, EntityLoc, Generation, SystemDescriptor,
+    SystemHandle, SystemRegistrationError, SystemRegistry,
 };
 use std::{collections::HashMap, convert::TryFrom};
 use thiserror::Error;
