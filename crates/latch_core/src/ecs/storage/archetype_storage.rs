@@ -1,10 +1,17 @@
 use crate::{
-    ecs::{meta_of, ArchetypeLayout, ComponentId, ComponentMeta, EntityId},
+    ecs::{meta_of, ArchetypeLayout, Component, ComponentId, ComponentMeta, EntityId},
     pool::{PagedPool, PoolError},
 };
 use latch_env::memory::Memory;
 use std::{
-    collections::HashMap, mem::MaybeUninit, num::NonZeroUsize, ops::Range, ptr, slice, sync::Arc,
+    alloc::{alloc, dealloc, handle_alloc_error, Layout},
+    collections::HashMap,
+    mem,
+    num::NonZeroUsize,
+    ops::Range,
+    ptr::{self, NonNull},
+    slice,
+    sync::Arc,
 };
 use thiserror::Error;
 
@@ -87,25 +94,34 @@ pub fn plan_archetype(
 }
 
 struct BytePage {
-    buf: Box<[MaybeUninit<u8>]>,
+    ptr: NonNull<u8>,
     len: usize,
     capacity_rows: usize,
     stride: usize,
+    align: usize,
+    alloc_size: usize,
 }
 
 impl BytePage {
-    fn with_capacity(rows: usize, stride: usize) -> Self {
-        let total = rows * stride;
-        let mut vec: Vec<MaybeUninit<u8>> = Vec::with_capacity(total);
-        unsafe {
-            // SAFETY: we reserved exactly `total` elements and never read uninitialised bytes.
-            vec.set_len(total);
-        }
+    fn with_capacity(rows: usize, stride: usize, align: usize) -> Self {
+        debug_assert!(
+            align.is_power_of_two(),
+            "page alignment must be power-of-two"
+        );
+        let total = rows
+            .checked_mul(stride)
+            .expect("byte page allocation overflow");
+        let alloc_size = total.max(align);
+        let layout = Layout::from_size_align(alloc_size, align).expect("invalid layout");
+        let ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
         Self {
-            buf: vec.into_boxed_slice(),
+            ptr,
             len: 0,
             capacity_rows: rows,
             stride,
+            align,
+            alloc_size,
         }
     }
 
@@ -138,7 +154,7 @@ impl BytePage {
         let len_bytes = rows * self.stride;
         unsafe {
             // SAFETY: callers validate range, so the slice stays within the allocated buffer.
-            slice::from_raw_parts(self.buf.as_ptr().add(offset) as *const u8, len_bytes)
+            slice::from_raw_parts(self.ptr.as_ptr().add(offset), len_bytes)
         }
     }
 
@@ -147,7 +163,7 @@ impl BytePage {
         let len_bytes = rows * self.stride;
         unsafe {
             // SAFETY: callers validate range, giving exclusive access within the buffer.
-            slice::from_raw_parts_mut(self.buf.as_mut_ptr().add(offset) as *mut u8, len_bytes)
+            slice::from_raw_parts_mut(self.ptr.as_ptr().add(offset), len_bytes)
         }
     }
 
@@ -167,6 +183,15 @@ impl BytePage {
     fn pop_one(&mut self) {
         if self.len > 0 {
             self.len -= 1;
+        }
+    }
+}
+
+impl Drop for BytePage {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.alloc_size, self.align).expect("invalid layout");
+        unsafe {
+            dealloc(self.ptr.as_ptr(), layout);
         }
     }
 }
@@ -223,12 +248,21 @@ pub enum ColumnError {
     IndexOutOfBounds { index: usize, len: usize },
     #[error("stride mismatch: expected {expected} bytes, got {got} bytes")]
     StrideMismatch { expected: usize, got: usize },
+    #[error("type mismatch for component: expected stride {expected_stride} bytes (align {expected_align}), but got stride {actual_stride} (align {actual_align})")]
+    TypeMismatch {
+        expected_stride: usize,
+        expected_align: usize,
+        actual_stride: usize,
+        actual_align: usize,
+    },
 }
 
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("component id {component_id} not present in archetype")]
     ColumnMissing { component_id: ComponentId },
+    #[error("duplicate column request for component id {component_id}")]
+    DuplicateColumnRequest { component_id: ComponentId },
     #[error(transparent)]
     Column(#[from] ColumnError),
     #[error("entity pool error: {0:?}")]
@@ -243,6 +277,7 @@ pub struct ComponentColumn {
     plan: ColumnPlan,
     rows_per_page: usize,
     stride: usize,
+    align: usize,
     shift: u32,
     mask: usize,
     cur_pages: Vec<BytePage>,
@@ -254,12 +289,14 @@ impl ComponentColumn {
     pub fn new(plan: ColumnPlan, rows_per_page: usize) -> Self {
         debug_assert!(rows_per_page.is_power_of_two());
         let stride = plan.meta.stride;
+        let align = plan.meta.align;
         let shift = rows_per_page.trailing_zeros();
         let mask = rows_per_page - 1;
         Self {
             plan,
             rows_per_page,
             stride,
+            align,
             shift,
             mask,
             cur_pages: Vec::new(),
@@ -284,8 +321,29 @@ impl ComponentColumn {
     }
 
     #[inline]
+    pub fn align(&self) -> usize {
+        self.align
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    #[inline]
+    pub fn page_count(&self) -> usize {
+        self.cur_pages.len()
+    }
+
+    pub fn page_range(&self, page_idx: usize) -> Range<usize> {
+        let page = self
+            .cur_pages
+            .get(page_idx)
+            .expect("page index out of bounds");
+        let start = page_idx << self.shift;
+        let end = start + page.len();
+        debug_assert!(end <= self.len, "page range exceeds column length");
+        start..end
     }
 
     pub fn alloc_one(&mut self) -> usize {
@@ -350,6 +408,42 @@ impl ComponentColumn {
         let read = self.cur_pages[page_idx].slice_bytes(local.start, local.len());
         let write = self.nxt_pages[page_idx].slice_bytes_mut(local.start, local.len());
         Ok((read, write))
+    }
+
+    pub fn slice_read_typed<T>(&self, range: Range<usize>) -> Result<&[T], ColumnError> {
+        self.validate_typed::<T>()?;
+        let (page_idx, local) = self.localize_range(range)?;
+        let bytes = self.cur_pages[page_idx].slice_bytes(local.start, local.len());
+        Ok(Self::cast_bytes::<T>(bytes, local.len()))
+    }
+
+    pub fn slice_write_typed<T>(&mut self, range: Range<usize>) -> Result<&mut [T], ColumnError> {
+        self.validate_typed::<T>()?;
+        let (page_idx, local) = self.localize_range(range)?;
+        let bytes = self.nxt_pages[page_idx].slice_bytes_mut(local.start, local.len());
+        Ok(Self::cast_bytes_mut::<T>(bytes, local.len()))
+    }
+
+    pub fn slice_rw_typed<T>(
+        &mut self,
+        range: Range<usize>,
+    ) -> Result<(&[T], &mut [T]), ColumnError> {
+        self.validate_typed::<T>()?;
+        let (page_idx, local) = self.localize_range(range)?;
+        let read = self.cur_pages[page_idx].slice_bytes(local.start, local.len());
+        let write = self.nxt_pages[page_idx].slice_bytes_mut(local.start, local.len());
+        Ok((
+            Self::cast_bytes::<T>(read, local.len()),
+            Self::cast_bytes_mut::<T>(write, local.len()),
+        ))
+    }
+
+    pub fn column_slice_read<T>(&self) -> Result<&[T], ColumnError> {
+        self.slice_read_typed::<T>(0..self.len)
+    }
+
+    pub fn column_slice_write<T>(&mut self) -> Result<&mut [T], ColumnError> {
+        self.slice_write_typed::<T>(0..self.len)
     }
 
     pub fn swap_buffers(&mut self) {
@@ -423,12 +517,52 @@ impl ComponentColumn {
             .map(|page| page.is_full())
             .unwrap_or(true)
         {
-            self.cur_pages
-                .push(BytePage::with_capacity(self.rows_per_page, self.stride));
-            self.nxt_pages
-                .push(BytePage::with_capacity(self.rows_per_page, self.stride));
+            self.cur_pages.push(BytePage::with_capacity(
+                self.rows_per_page,
+                self.stride,
+                self.align,
+            ));
+            self.nxt_pages.push(BytePage::with_capacity(
+                self.rows_per_page,
+                self.stride,
+                self.align,
+            ));
         }
         self.cur_pages.len() - 1
+    }
+
+    fn validate_typed<T>(&self) -> Result<(), ColumnError> {
+        let expected_stride = self.stride;
+        let expected_align = self.align;
+        let actual_stride = mem::size_of::<T>();
+        let actual_align = mem::align_of::<T>();
+        if actual_stride != expected_stride || actual_align != expected_align {
+            return Err(ColumnError::TypeMismatch {
+                expected_stride,
+                expected_align,
+                actual_stride,
+                actual_align,
+            });
+        }
+        Ok(())
+    }
+
+    fn cast_bytes<T>(bytes: &[u8], rows: usize) -> &[T] {
+        debug_assert_eq!(bytes.len(), rows * mem::size_of::<T>());
+        unsafe {
+            // SAFETY: caller validated the stride and alignment match `T` and there are `rows`
+            // consecutive elements in the byte slice.
+            slice::from_raw_parts(bytes.as_ptr() as *const T, rows)
+        }
+    }
+
+    fn cast_bytes_mut<T>(bytes: &mut [u8], rows: usize) -> &mut [T] {
+        debug_assert_eq!(bytes.len(), rows * mem::size_of::<T>());
+        unsafe {
+            // SAFETY: caller validated the stride and alignment match `T` and there are `rows`
+            // consecutive elements in the byte slice, giving exclusive access through `bytes`.
+            slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut T, rows)
+        }
     }
 
     fn move_row(&mut self, from: usize, to: usize) -> Result<(), ColumnError> {
@@ -617,6 +751,56 @@ impl ArchetypeStorage {
         Ok(&mut self.columns[idx])
     }
 
+    pub fn columns_mut_pair(
+        &mut self,
+        a: ComponentId,
+        b: ComponentId,
+    ) -> Result<(&mut ComponentColumn, &mut ComponentColumn), StorageError> {
+        if a == b {
+            return Err(StorageError::DuplicateColumnRequest { component_id: a });
+        }
+
+        let idx_a = self
+            .index_by_component
+            .get(&a)
+            .copied()
+            .ok_or(StorageError::ColumnMissing { component_id: a })?;
+        let idx_b = self
+            .index_by_component
+            .get(&b)
+            .copied()
+            .ok_or(StorageError::ColumnMissing { component_id: b })?;
+
+        if idx_a < idx_b {
+            let (left, right) = self.columns.split_at_mut(idx_b);
+            Ok((&mut left[idx_a], &mut right[0]))
+        } else {
+            let (left, right) = self.columns.split_at_mut(idx_a);
+            Ok((&mut right[0], &mut left[idx_b]))
+        }
+    }
+
+    pub fn column(&self, component_id: ComponentId) -> Result<&ComponentColumn, StorageError> {
+        let idx = self
+            .index_by_component
+            .get(&component_id)
+            .copied()
+            .ok_or(StorageError::ColumnMissing { component_id })?;
+        Ok(&self.columns[idx])
+    }
+
+    pub fn column_slice<T: Component>(&self) -> Result<&[T], StorageError> {
+        let component_id = <T as Component>::id();
+        let column = self.column(component_id)?;
+        column.column_slice_read::<T>().map_err(StorageError::from)
+    }
+
+    pub fn column_slice_mut<T: Component>(&mut self) -> Result<&mut [T], StorageError> {
+        let component_id = <T as Component>::id();
+        let column = self.column_mut(component_id)?;
+        column.column_slice_write::<T>().map_err(StorageError::from)
+    }
+
     pub fn alloc_row(&mut self, entity_id: EntityId) -> Result<usize, StorageError> {
         let gidx = self.entity_ids.alloc_one();
         for column in &mut self.columns {
@@ -743,5 +927,64 @@ impl ArchetypeStorage {
         self.len = self.entity_ids.len_total();
         debug_assert_eq!(self.len, self.entity_ids.len_total());
         Ok(())
+    }
+
+    #[inline]
+    pub fn current_buffer_index(&self) -> usize {
+        0
+    }
+
+    #[inline]
+    pub fn next_buffer_index(&self) -> usize {
+        1
+    }
+
+    pub fn get_column_ptr_const(
+        &self,
+        component_id: ComponentId,
+    ) -> Option<*const ComponentColumn> {
+        self.index_by_component
+            .get(&component_id)
+            .map(|&idx| &self.columns[idx] as *const ComponentColumn)
+    }
+
+    pub fn get_column_ptr(&mut self, component_id: ComponentId) -> Option<*mut ComponentColumn> {
+        self.index_by_component
+            .get(&component_id)
+            .map(|&idx| &mut self.columns[idx] as *mut ComponentColumn)
+    }
+
+    pub unsafe fn column_ptr_to_slice_const<'a, T: Component>(
+        column_ptr: *const ComponentColumn,
+        _buffer_index: usize,
+    ) -> &'a [T] {
+        let column = &*column_ptr;
+        if column.page_count() > 1 {
+            panic!(
+                "columns! macro requires component '{}' to fit within a single page (found {} pages)",
+                column.plan().meta.name,
+                column.page_count()
+            );
+        }
+        column
+            .column_slice_read::<T>()
+            .unwrap_or_else(|err| panic!("failed to borrow column for read: {err}"))
+    }
+
+    pub unsafe fn column_ptr_to_slice<'a, T: Component>(
+        column_ptr: *mut ComponentColumn,
+        _buffer_index: usize,
+    ) -> &'a mut [T] {
+        let column = &mut *column_ptr;
+        if column.page_count() > 1 {
+            panic!(
+                "columns_mut! macro requires component '{}' to fit within a single page (found {} pages)",
+                column.plan().meta.name,
+                column.page_count()
+            );
+        }
+        column
+            .column_slice_write::<T>()
+            .unwrap_or_else(|err| panic!("failed to borrow column for write: {err}"))
     }
 }

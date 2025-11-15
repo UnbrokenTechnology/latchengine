@@ -1,7 +1,8 @@
 use crate::ecs::{
     storage::{plan_archetype, ArchetypeStorage, PageBudget, PlanError, StorageError},
-    ArchetypeId, ArchetypeLayout, ComponentId, Entity, EntityBuilder, EntityBuilderError, EntityId,
-    EntityLoc, Generation,
+    ArchetypeId, ArchetypeLayout, Component, ComponentId, Entity, EntityBuilder,
+    EntityBuilderError, EntityId, EntityLoc, Generation, SystemDescriptor, SystemHandle,
+    SystemRegistrationError, SystemRegistry,
 };
 use std::{collections::HashMap, convert::TryFrom};
 use thiserror::Error;
@@ -67,6 +68,7 @@ pub struct World {
     page_budget: PageBudget,
     storages: HashMap<ArchetypeId, ArchetypeEntry>,
     component_index: HashMap<ComponentId, Vec<ArchetypeId>>,
+    systems: SystemRegistry,
     slots: Vec<EntitySlot>,
     free_list: Vec<EntityId>,
     live_count: usize,
@@ -82,6 +84,7 @@ impl World {
             page_budget,
             storages: HashMap::new(),
             component_index: HashMap::new(),
+            systems: SystemRegistry::new(),
             slots: Vec::new(),
             free_list: Vec::new(),
             live_count: 0,
@@ -241,6 +244,33 @@ impl World {
             .unwrap_or(&[])
     }
 
+    pub fn register_system(
+        &mut self,
+        descriptor: SystemDescriptor,
+    ) -> Result<SystemHandle, SystemRegistrationError> {
+        self.systems.register(descriptor)
+    }
+
+    pub fn system_descriptor(&self, handle: SystemHandle) -> Option<&SystemDescriptor> {
+        self.systems.descriptor(handle)
+    }
+
+    pub fn system_components(&self, handle: SystemHandle) -> Option<&[ComponentId]> {
+        self.systems.component_filter(handle)
+    }
+
+    pub fn system_read_components(&self, handle: SystemHandle) -> Option<&[ComponentId]> {
+        self.systems.read_components(handle)
+    }
+
+    pub fn system_write_components(&self, handle: SystemHandle) -> Option<&[ComponentId]> {
+        self.systems.write_components(handle)
+    }
+
+    pub fn systems(&self) -> impl Iterator<Item = (SystemHandle, &SystemDescriptor)> {
+        self.systems.iter()
+    }
+
     pub fn live_entity_count(&self) -> usize {
         self.live_count
     }
@@ -253,6 +283,40 @@ impl World {
         for entry in self.storages.values_mut() {
             entry.storage.swap_buffers();
         }
+    }
+
+    pub fn for_each(
+        &mut self,
+        component_ids: &[ComponentId],
+        mut f: impl FnMut(&mut ArchetypeStorage),
+    ) {
+        if component_ids.is_empty() {
+            return;
+        }
+
+        let mut ids = component_ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+
+        for entry in self.storages.values_mut() {
+            if entry.storage.is_empty() {
+                continue;
+            }
+            let layout_components = entry.storage.plan().layout.components();
+            if ids.iter().all(|id| layout_components.contains(id)) {
+                f(&mut entry.storage);
+            }
+        }
+    }
+
+    pub fn column<T: Component>(&self, archetype: ArchetypeId) -> Option<&[T]> {
+        self.storages
+            .get(&archetype)
+            .and_then(|entry| entry.storage.column_slice::<T>().ok())
+    }
+
+    pub fn entity_count(&self) -> usize {
+        self.live_count
     }
 
     fn ensure_archetype_exists(&mut self, layout: &ArchetypeLayout) -> Result<(), WorldError> {

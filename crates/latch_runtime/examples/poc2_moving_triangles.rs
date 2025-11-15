@@ -12,7 +12,7 @@
 // - Visual confirmation of replay matching original
 
 use latch_core::define_component;
-use latch_core::ecs::{Component, World};
+use latch_core::ecs::{ComponentId, SystemDescriptor, SystemHandle, World};
 use latch_core::spawn;
 use latch_core::time::{InputRecorder, SimulationTime, TickInput, TICK_DURATION_SECS};
 use latch_metrics::{FrameTimer, SystemProfiler};
@@ -82,47 +82,129 @@ define_component!(Color, 3, "Color");
 // Systems
 // ============================================================================
 
-fn physics_system(world: &mut World, _dt: f32) {
-    use latch_core::{columns, columns_mut};
-    use rayon::prelude::*;
+#[derive(Clone, Copy)]
+struct TilePair {
+    len: usize,
+    pos_read: *const Position,
+    pos_write: *mut Position,
+    vel_read: *const Velocity,
+    vel_write: *mut Velocity,
+}
 
-    // Integer-based deterministic physics with double-buffering!
-    // - Read from "current" buffer (stable state from last tick)
-    // - Write to "next" buffer (new state for next tick)
-    // - No floating-point, no drift, perfect replay.
+// SAFETY: Each tile covers a disjoint range of rows, so sharing the raw pointers across
+// threads is safe as long as every tile is processed exactly once.
+unsafe impl Send for TilePair {}
+unsafe impl Sync for TilePair {}
 
-    world.for_each(&[Position::ID, Velocity::ID], |storage| {
-        // Read from "current" buffer, write to "next" buffer
-        let (pos_read, vel_read) = columns!(storage, Position, Velocity);
-        let (pos_write, vel_write) = columns_mut!(storage, Position, Velocity);
+struct PhysicsSystem {
+    handle: SystemHandle,
+    component_filter: Vec<ComponentId>,
+    tiles: Vec<TilePair>,
+}
 
-        // Parallel iteration: read old state, write new state
-        pos_write
-            .par_iter_mut()
-            .zip(vel_write.par_iter_mut())
-            .zip(pos_read.par_iter())
-            .zip(vel_read.par_iter())
-            .for_each(|(((pos_out, vel_out), pos_in), vel_in)| {
-                // Update position (pure integer arithmetic!)
-                pos_out.x = pos_in.x + vel_in.x as i32;
-                pos_out.y = pos_in.y + vel_in.y as i32;
+impl PhysicsSystem {
+    fn new(world: &mut World) -> Self {
+        let descriptor = SystemDescriptor::new("physics")
+            .reads([Position::ID, Velocity::ID])
+            .writes([Position::ID, Velocity::ID]);
 
-                // Copy velocity for next iteration
-                vel_out.x = vel_in.x;
-                vel_out.y = vel_in.y;
+        let component_filter = descriptor.all_components().to_vec();
+        let handle = world
+            .register_system(descriptor)
+            .expect("failed to register physics system");
 
-                // Bounce off edges (NDC bounds: ±1,000,000 units = ±10 meters)
-                let bound = UNITS_PER_NDC;
-                if pos_out.x < -bound || pos_out.x > bound {
-                    pos_out.x = pos_out.x.clamp(-bound, bound);
-                    vel_out.x = vel_out.x.saturating_neg(); // Handle i16::MIN overflow
+        Self {
+            handle,
+            component_filter,
+            tiles: Vec::new(),
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        use rayon::prelude::*;
+        use std::slice;
+
+        if cfg!(debug_assertions) {
+            debug_assert!(world.system_descriptor(self.handle).is_some());
+        }
+
+        world.for_each(&self.component_filter, |storage| {
+            let (pos_col, vel_col) = storage
+                .columns_mut_pair(Position::ID, Velocity::ID)
+                .expect("archetype missing position/velocity columns");
+
+            debug_assert_eq!(pos_col.page_count(), vel_col.page_count());
+
+            self.tiles.clear();
+            self.tiles.reserve(pos_col.page_count());
+
+            for page_idx in 0..pos_col.page_count() {
+                let range = pos_col.page_range(page_idx);
+                if range.is_empty() {
+                    continue;
                 }
-                if pos_out.y < -bound || pos_out.y > bound {
-                    pos_out.y = pos_out.y.clamp(-bound, bound);
-                    vel_out.y = vel_out.y.saturating_neg(); // Handle i16::MIN overflow
+
+                let start = range.start;
+                let end = range.end;
+
+                let (pos_read, pos_write) = pos_col
+                    .slice_rw_typed::<Position>(start..end)
+                    .expect("position tile slice");
+                let (vel_read, vel_write) = vel_col
+                    .slice_rw_typed::<Velocity>(start..end)
+                    .expect("velocity tile slice");
+
+                debug_assert_eq!(pos_read.len(), vel_read.len());
+
+                self.tiles.push(TilePair {
+                    len: pos_read.len(),
+                    pos_read: pos_read.as_ptr(),
+                    pos_write: pos_write.as_mut_ptr(),
+                    vel_read: vel_read.as_ptr(),
+                    vel_write: vel_write.as_mut_ptr(),
+                });
+            }
+
+            self.tiles.par_iter().for_each(|tile| unsafe {
+                let pos_in = slice::from_raw_parts(tile.pos_read, tile.len);
+                let pos_out = slice::from_raw_parts_mut(tile.pos_write, tile.len);
+                let vel_in = slice::from_raw_parts(tile.vel_read, tile.len);
+                let vel_out = slice::from_raw_parts_mut(tile.vel_write, tile.len);
+
+                for i in 0..tile.len {
+                    let src_pos = pos_in[i];
+                    let src_vel = vel_in[i];
+                    let dst_pos = &mut pos_out[i];
+                    let dst_vel = &mut vel_out[i];
+
+                    let bound = UNITS_PER_NDC;
+
+                    dst_pos.x = src_pos.x + src_vel.x as i32;
+                    dst_pos.y = src_pos.y + src_vel.y as i32;
+
+                    if dst_pos.x < -bound {
+                        dst_pos.x += ((-bound) - dst_pos.x) * 2;
+                        dst_vel.x = src_vel.x.saturating_neg();
+                    } else if dst_pos.x > bound {
+                        dst_pos.x += (bound - dst_pos.x) * 2;
+                        dst_vel.x = src_vel.x.saturating_neg();
+                    } else {
+                        dst_vel.x = src_vel.x;
+                    }
+                    
+                    if dst_pos.y < -bound {
+                        dst_pos.y += ((-bound) - dst_pos.y) * 2;
+                        dst_vel.y = src_vel.y.saturating_neg();
+                    } else if dst_pos.y > bound {
+                        dst_pos.y += (bound - dst_pos.y) * 2;
+                        dst_vel.y = src_vel.y.saturating_neg();
+                    } else {
+                        dst_vel.y = src_vel.y;
+                    }
                 }
             });
-    });
+        });
+    }
 }
 
 // ============================================================================
@@ -433,59 +515,87 @@ impl TriangleRenderer {
                     continue;
                 }
 
-                if let (Some(positions), Some(velocities), Some(colors)) = (
-                    world.column::<Position>(arch_id),
-                    world.column::<Velocity>(arch_id),
-                    world.column::<Color>(arch_id),
-                ) {
-                    // PHASE 2: Reserve space
+                if let Some(storage) = world.storage(arch_id) {
+                    let positions_col = storage
+                        .column(Position::ID)
+                        .expect("position column missing");
+                    let velocities_col = storage
+                        .column(Velocity::ID)
+                        .expect("velocity column missing");
+                    let colors_col = storage.column(Color::ID).expect("color column missing");
+
+                    debug_assert_eq!(positions_col.page_count(), velocities_col.page_count());
+                    debug_assert_eq!(positions_col.page_count(), colors_col.page_count());
+
                     let reserve_start = std::time::Instant::now();
-                    let count = positions.len();
-                    dynamic_data.reserve(count);
+                    let archetype_count = positions_col.len();
+                    dynamic_data.reserve(archetype_count);
                     if !static_data_built {
-                        static_data.reserve(count);
+                        static_data.reserve(archetype_count);
                     }
                     bench_reserve_us += reserve_start.elapsed().as_micros() as u64;
 
-                    // PHASE 3: Copy data using unsafe direct memory operations
-                    // This eliminates Vec::push bounds checks (5M × 2 = 10M checks!)
-                    let copy_start = std::time::Instant::now();
-
-                    unsafe {
-                        // Get raw pointers to the end of our vectors
-                        let dynamic_ptr = dynamic_data.as_mut_ptr().add(dynamic_data.len());
-                        let dynamic_start_len = dynamic_data.len();
-
-                        // Copy dynamic data (position + velocity)
-                        for i in 0..count {
-                            std::ptr::write(
-                                dynamic_ptr.add(i),
-                                InstanceDynamic {
-                                    position: [positions[i].x, positions[i].y],
-                                    velocity: [velocities[i].x, velocities[i].y],
-                                },
-                            );
+                    for page_idx in 0..positions_col.page_count() {
+                        let range = positions_col.page_range(page_idx);
+                        if range.is_empty() {
+                            continue;
                         }
-                        dynamic_data.set_len(dynamic_start_len + count);
 
-                        // Copy static data (color only, first time)
-                        if !static_data_built {
-                            let static_ptr = static_data.as_mut_ptr().add(static_data.len());
-                            let static_start_len = static_data.len();
+                        let start = range.start;
+                        let end = range.end;
 
+                        let positions = positions_col
+                            .slice_read_typed::<Position>(start..end)
+                            .expect("position tile slice");
+                        let velocities = velocities_col
+                            .slice_read_typed::<Velocity>(start..end)
+                            .expect("velocity tile slice");
+                        let colors = colors_col
+                            .slice_read_typed::<Color>(start..end)
+                            .expect("color tile slice");
+
+                        let count = positions.len();
+
+                        // PHASE 3: Copy data using unsafe direct memory operations
+                        // This eliminates Vec::push bounds checks (5M × 2 = 10M checks!)
+                        let copy_start = std::time::Instant::now();
+
+                        unsafe {
+                            // Get raw pointers to the end of our vectors
+                            let dynamic_ptr = dynamic_data.as_mut_ptr().add(dynamic_data.len());
+                            let dynamic_start_len = dynamic_data.len();
+
+                            // Copy dynamic data (position + velocity)
                             for i in 0..count {
                                 std::ptr::write(
-                                    static_ptr.add(i),
-                                    InstanceStatic {
-                                        color: [colors[i].r, colors[i].g, colors[i].b, 0],
+                                    dynamic_ptr.add(i),
+                                    InstanceDynamic {
+                                        position: [positions[i].x, positions[i].y],
+                                        velocity: [velocities[i].x, velocities[i].y],
                                     },
                                 );
                             }
-                            static_data.set_len(static_start_len + count);
-                        }
-                    }
+                            dynamic_data.set_len(dynamic_start_len + count);
 
-                    bench_copy_us += copy_start.elapsed().as_micros() as u64;
+                            // Copy static data (color only, first time)
+                            if !static_data_built {
+                                let static_ptr = static_data.as_mut_ptr().add(static_data.len());
+                                let static_start_len = static_data.len();
+
+                                for i in 0..count {
+                                    std::ptr::write(
+                                        static_ptr.add(i),
+                                        InstanceStatic {
+                                            color: [colors[i].r, colors[i].g, colors[i].b, 0],
+                                        },
+                                    );
+                                }
+                                static_data.set_len(static_start_len + count);
+                            }
+                        }
+
+                        bench_copy_us += copy_start.elapsed().as_micros() as u64;
+                    }
                 }
             }
 
@@ -658,6 +768,7 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<TriangleRenderer>,
     world: World,
+    physics: PhysicsSystem,
     time: SimulationTime,
     recorder: InputRecorder,
     mouse_pos: (f32, f32),
@@ -679,7 +790,7 @@ enum Mode {
 
 impl App {
     fn new() -> Self {
-        let mut world = World::new();
+    let mut world = World::new();
 
         // Spawn triangles with random positions and velocities
         use std::f32::consts::PI;
@@ -717,6 +828,8 @@ impl App {
             spawn!(world, pos, vel, color);
         }
 
+        let physics = PhysicsSystem::new(&mut world);
+
         let mut recorder = InputRecorder::new();
         recorder.start_recording();
 
@@ -724,6 +837,7 @@ impl App {
             window: None,
             renderer: None,
             world,
+            physics,
             time: SimulationTime::new(),
             recorder,
             mouse_pos: (0.0, 0.0),
@@ -754,7 +868,8 @@ impl App {
 
         // Run physics (writes to "next" buffer)
         self.profiler.time_system("physics", || {
-            physics_system(&mut self.world, TICK_DURATION_SECS);
+            self.physics
+                .run(&mut self.world, TICK_DURATION_SECS);
         });
 
         // Swap buffers: make "next" become "current" for the next tick

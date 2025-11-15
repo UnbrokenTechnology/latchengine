@@ -56,7 +56,8 @@ macro_rules! columns {
 
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
-            $storage.get_column_ptr_const(<$T as $crate::ecs::Component>::ID)
+            $storage
+                .get_column_ptr_const(<$T as $crate::ecs::Component>::id())
                 .expect("Component not found in archetype")
         }),+];
 
@@ -97,14 +98,15 @@ macro_rules! columns_mut {
     // Multiple components - use the general implementation
     ($storage:expr, $($T:ty),+ $(,)?) => {{
         // Collect component IDs and verify uniqueness at compile time
-        let ids = [$(<$T as $crate::ecs::Component>::ID),+];
+    let ids = [$(<$T as $crate::ecs::Component>::id()),+];
 
         // Get the next buffer index (what we write to)
         let next_buffer = $storage.next_buffer_index();
 
         // Get raw pointers to each column
         let ptrs = [$(unsafe {
-            $storage.get_column_ptr(<$T as $crate::ecs::Component>::ID)
+            $storage
+                .get_column_ptr(<$T as $crate::ecs::Component>::id())
                 .expect("Component not found in archetype")
         }),+];
 

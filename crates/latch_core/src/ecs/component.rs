@@ -118,6 +118,7 @@ fn register_internal(
     stride: usize,
     pod: bool,
     fields: Vec<FieldMeta>,
+    explicit_id: Option<ComponentId>,
 ) -> ComponentHandle {
     assert!(
         align.is_power_of_two(),
@@ -135,12 +136,34 @@ fn register_internal(
             .by_id
             .get(&id)
             .expect("registry missing component metadata");
+        if let Some(explicit) = explicit_id {
+            assert_eq!(
+                id, explicit,
+                "component '{}' registered with id {} but expected {}",
+                name, id, explicit
+            );
+        }
         validate_layout(existing, size, align, stride, pod, &fields);
         return existing.handle();
     }
 
-    let id = reg.next_id;
-    reg.next_id = reg.next_id.checked_add(1).expect("component id overflow");
+    let id = if let Some(explicit) = explicit_id {
+        if reg.by_id.contains_key(&explicit) {
+            panic!("component id {explicit} already registered");
+        }
+        explicit
+    } else {
+        let id = reg.next_id;
+        reg.next_id = reg.next_id.checked_add(1).expect("component id overflow");
+        id
+    };
+
+    if let Some(explicit) = explicit_id {
+        let next_after = explicit
+            .checked_add(1)
+            .expect("component id overflow when advancing registry");
+        reg.next_id = reg.next_id.max(next_after);
+    }
 
     let meta = ComponentMeta {
         id,
@@ -166,7 +189,7 @@ pub fn register_component(
     pod: bool,
     fields: Vec<FieldMeta>,
 ) -> ComponentHandle {
-    register_internal(name, size, align, stride, pod, fields)
+    register_internal(name, size, align, stride, pod, fields, None)
 }
 
 /// Register an externally-described component (e.g. scripting, tooling).
@@ -178,7 +201,20 @@ pub fn register_external_component_with_fields(
     fields: Vec<FieldMeta>,
     pod: bool,
 ) -> ComponentHandle {
-    register_internal(name, size, align, stride, pod, fields)
+    register_internal(name, size, align, stride, pod, fields, None)
+}
+
+/// Register a Rust component with an explicit, stable component id.
+pub fn register_component_with_id(
+    id: ComponentId,
+    name: &str,
+    size: usize,
+    align: usize,
+    stride: usize,
+    pod: bool,
+    fields: Vec<FieldMeta>,
+) -> ComponentHandle {
+    register_internal(name, size, align, stride, pod, fields, Some(id))
 }
 
 /// Retrieve metadata by id.
@@ -266,6 +302,12 @@ macro_rules! define_component {
         impl $crate::ecs::Component for $ty {
             const NAME: &'static str = $name;
         }
+
+        impl $ty {
+            pub fn component_id() -> $crate::ecs::ComponentId {
+                <$ty as $crate::ecs::Component>::id()
+            }
+        }
     };
 
     ($ty:ty, $id:expr, $name:expr) => {
@@ -273,14 +315,14 @@ macro_rules! define_component {
             const NAME: &'static str = $name;
 
             fn handle() -> $crate::ecs::ComponentHandle {
-                static HANDLE: $crate::ecs::component::__ComponentOnceCell<
-                    $crate::ecs::ComponentHandle,
-                > = $crate::ecs::component::__ComponentOnceCell::new();
+                static HANDLE: $crate::ecs::__ComponentOnceCell<$crate::ecs::ComponentHandle> =
+                    $crate::ecs::__ComponentOnceCell::new();
                 *HANDLE.get_or_init(|| {
                     let size = std::mem::size_of::<$ty>();
                     let align = std::mem::align_of::<$ty>();
                     let stride = size.next_multiple_of(align);
-                    let handle = $crate::ecs::register_component(
+                    let handle = $crate::ecs::register_component_with_id(
+                        $id,
                         $name,
                         size,
                         align,
@@ -288,13 +330,16 @@ macro_rules! define_component {
                         <$ty as $crate::ecs::Component>::is_pod(),
                         <$ty as $crate::ecs::Component>::fields(),
                     );
-                    debug_assert_eq!(
-                        handle.id, $id,
-                        "component '{}' registered with id {} but expected {}",
-                        $name, handle.id, $id,
-                    );
                     handle
                 })
+            }
+        }
+
+        impl $ty {
+            pub const ID: $crate::ecs::ComponentId = $id;
+
+            pub fn component_id() -> $crate::ecs::ComponentId {
+                Self::ID
             }
         }
     };
