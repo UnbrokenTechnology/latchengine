@@ -801,7 +801,7 @@ impl App {
 
             // Distribute triangles across the visible area
             // radius: 0.3-0.9 NDC = 3-9 meters = 300,000-900,000 units
-            let radius_ndc = 0.3 + (i as f32 / f_num_triangles) * 0.6;
+            let radius_ndc = 0.3 + (i as f32 / f_num_triangles) * 0.4;
             let radius_units = (radius_ndc * UNITS_PER_NDC as f32) as i32;
 
             // Position in game units (integer from the start!)
@@ -815,8 +815,8 @@ impl App {
             // At 60 Hz: 300,000 / 60 = 5,000 units/tick (well within i16 range ±32,767)
             let speed_units_per_tick = 5000;
             let vel = Velocity {
-                x: ((angle + PI / 2.0).cos() * speed_units_per_tick as f32) as i16,
-                y: ((angle + PI / 2.0).sin() * speed_units_per_tick as f32) as i16,
+                x: ((angle + 3.0 * PI / 2.0).cos() * speed_units_per_tick as f32) as i16,
+                y: ((angle + 3.0 * PI / 2.0).sin() * speed_units_per_tick as f32) as i16,
             };
 
             let color = Color {
