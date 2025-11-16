@@ -6,154 +6,102 @@
 // - Push particles away from each other on collision
 // - Show efficient neighbor queries without iterating all entities
 //
-// Success Criteria:
-// - 10,000+ sand particles
-// - Smooth 60 FPS with collision detection
-// - Particles never overlap
-// - Query performance scales better than O(n²)
-
-use latch_core::define_component;
-use latch_core::ecs::{
-    query_params_radius, ComponentId, QueryRegistry, SpatialHashConfig, SpatialHashGrid,
-    SystemDescriptor, SystemHandle, World,
-};
-use latch_core::spawn;
-use latch_core::time::{SimulationTime, TICK_DURATION_SECS};
-use latch_metrics::{FrameTimer, SystemProfiler};
-
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowId},
-};
-
-use std::sync::Arc;
-use wgpu;
-use wgpu::util::DeviceExt;
-
-// ============================================================================
-// Components
-// ============================================================================
-
-const UNITS_PER_METER: i32 = 100_000;
-const UNITS_PER_NDC: i32 = 10 * UNITS_PER_METER;
-
-#[derive(Clone, Copy, Debug)]
-struct Position {
-    x: i32,
-    y: i32,
-}
-define_component!(Position, 1, "Position");
-
-#[derive(Clone, Copy, Debug)]
-struct Velocity {
-    x: i16,
-    y: i16,
-}
-define_component!(Velocity, 2, "Velocity");
-
-#[derive(Clone, Copy, Debug)]
-struct Color {
-    r: u8,
-    g: u8,
-    b: u8,
-}
-define_component!(Color, 3, "Color");
-
-// ============================================================================
-// Systems
-// ============================================================================
-
-struct PhysicsSystem {
-    #[allow(dead_code)]
-    handle: SystemHandle,
-    component_filter: Vec<ComponentId>,
-}
-
-impl PhysicsSystem {
-    fn new(world: &mut World) -> Self {
-        let descriptor = SystemDescriptor::new("physics")
-            .reads([Position::ID, Velocity::ID])
-            .writes([Position::ID, Velocity::ID]);
-
-        let component_filter = descriptor.all_components().to_vec();
-        let handle = world
-            .register_system(descriptor)
-            .expect("failed to register physics system");
-
-        Self {
-            handle,
-            component_filter,
-        }
-    }
-
-    fn run(&mut self, world: &mut World, queries: &QueryRegistry, _dt: f32) {
-        const GRAVITY: i16 = -50; // Downward acceleration
-        const PARTICLE_RADIUS: i32 = 30_000; // 0.3 meters in units
-        // Reduce query radius - we only need to check immediate neighbors, not ALL particles within 0.6m
-        const QUERY_RADIUS: i32 = PARTICLE_RADIUS; // Just check within particle radius (0.3m)
-
-        use std::cell::Cell;
-        let total_queries = Cell::new(0);
-        let total_neighbors_found = Cell::new(0);
-        let max_neighbors = Cell::new(0);
-
-        world.for_each(&self.component_filter, |storage| {
-            let (pos_col, vel_col) = storage
-                .columns_mut_pair(Position::ID, Velocity::ID)
-                .expect("archetype missing position/velocity columns");
-
-            for page_idx in 0..pos_col.page_count() {
-                let range = pos_col.page_range(page_idx);
-                if range.is_empty() {
-                    continue;
-                }
-
-                let start = range.start;
-                let end = range.end;
-
-                let (pos_read, pos_write) = pos_col
-                    .slice_rw_typed::<Position>(start..end)
-                    .expect("position tile slice");
-                let (vel_read, vel_write) = vel_col
-                    .slice_rw_typed::<Velocity>(start..end)
-                    .expect("velocity tile slice");
-
-                for i in 0..pos_read.len() {
-                    let src_pos = pos_read[i];
-                    let src_vel = vel_read[i];
-
-                    // Apply gravity
-                    let mut new_vel_y = src_vel.y + GRAVITY;
-                    new_vel_y = new_vel_y.max(-10000); // Terminal velocity
-
                     // Apply velocity
                     let mut new_x = src_pos.x + src_vel.x as i32;
-                    let mut new_y = src_pos.y + new_vel_y as i32;
+                    let mut new_y = src_pos.y + new_vel_y;
+                    let mut new_vel_x = src_vel.x as i32;
 
-                    // Check collisions with nearby particles using spatial hash
-                    // Note: This queries the spatial hash which reflects the PREVIOUS frame's positions
-                    // This is acceptable for soft-body physics and avoids borrowing issues
-                    if let Some(spatial_hash) = queries.get(Position::ID) {
-                        let query_params = query_params_radius(new_x, new_y, QUERY_RADIUS);
-                        let nearby = spatial_hash.query(&query_params);
+                    if debug_this_entity {
+                        println!(
+                            "[dbg] entity={} pos=({}, {}), vel=({}, {}) neighbors={}",
+                            entity_id,
+                            src_pos.x,
+                            src_pos.y,
+                            src_vel.x,
+                            src_vel.y,
+                            neighbors.len()
+                        );
+                    }
 
-                        total_queries.set(total_queries.get() + 1);
-                        total_neighbors_found.set(total_neighbors_found.get() + nearby.len());
-                        max_neighbors.set(max_neighbors.get().max(nearby.len()));
+                    if !neighbors.is_empty() {
+                        let mut push_x = 0.0f32;
+                        let mut push_y = 0.0f32;
+                        for (idx, relation) in neighbors.iter().enumerate() {
+                            let delta = match relation.delta {
+                                Some(delta) => delta,
+                                None => continue,
+                            };
+                            let dx = delta.dx as f32;
+                            let dy = delta.dy as f32;
+                            if dx == 0.0 && dy == 0.0 {
+                                continue;
+                            }
+                            let dist_sq = dx.mul_add(dx, dy * dy);
+                            if dist_sq <= 1.0 {
+                                continue;
+                            }
+                            let dist = dist_sq.sqrt();
+                            let penetration = (PARTICLE_DIAMETER as f32) - dist;
+                            if penetration <= 0.0 {
+                                continue;
+                            }
+                            let clamped_penetration = penetration.min(PARTICLE_DIAMETER as f32);
+                            let dir_x = dx / dist;
+                            let dir_y = dy / dist;
+                            push_x += dir_x * clamped_penetration;
+                            push_y += dir_y * clamped_penetration;
 
-                        if nearby.len() > 1 {
-                            // Has nearby particles (>1 because it includes self)
-                            // Apply a simple repulsion force
-                            new_vel_y = (new_vel_y * 9) / 10; // Dampen slightly
+                            if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
+                                let neighbor_pos = Position {
+                                    x: src_pos.x + delta.dx,
+                                    y: src_pos.y + delta.dy,
+                                };
+                                println!(
+                                    "  -> neighbor={} pos=({}, {}) delta=({}, {}), pen={:.2}",
+                                    relation.other.index(),
+                                    neighbor_pos.x,
+                                    neighbor_pos.y,
+                                    delta.dx,
+                                    delta.dy,
+                                    penetration
+                                );
+                            }
+                        }
+
+                        if push_x != 0.0 || push_y != 0.0 {
+                            let max_push = PARTICLE_DIAMETER as f32;
+                            let adj_x = push_x.clamp(-max_push, max_push).round() as i32;
+                            let adj_y = push_y.clamp(-max_push, max_push).round() as i32;
+                            new_x += adj_x;
+                            new_y += adj_y;
+
+                            let push_len = ((adj_x * adj_x + adj_y * adj_y) as f32).sqrt();
+                            if push_len > 0.0 {
+                                let normal_x = adj_x as f32 / push_len;
+                                let normal_y = adj_y as f32 / push_len;
+                                let vel_along_normal =
+                                    (new_vel_x as f32) * normal_x + (new_vel_y as f32) * normal_y;
+                                if vel_along_normal < 0.0 {
+                                    new_vel_x -= (normal_x * vel_along_normal).round() as i32;
+                                    new_vel_y -= (normal_y * vel_along_normal).round() as i32;
+                                }
+                            }
+
+                            new_vel_x = ((new_vel_x as f32) * 0.9) as i32;
+                            new_vel_y = ((new_vel_y as f32) * 0.9) as i32;
+
+                            if debug_this_entity {
+                                println!(
+                                    "  -> push=({}, {}), new_pos=({}, {}), new_vel=({}, {})",
+                                    adj_x, adj_y, new_x, new_y, new_vel_x, new_vel_y
+                                );
+                            }
                         }
                     }
 
                     // Boundary collision
                     let bound = UNITS_PER_NDC - PARTICLE_RADIUS;
-
-                    let mut new_vel_x = src_vel.x;
+                    let floor = FLOOR_Y + PARTICLE_RADIUS;
 
                     if new_x < -bound {
                         new_x = -bound;
@@ -163,8 +111,8 @@ impl PhysicsSystem {
                         new_vel_x = 0;
                     }
 
-                    if new_y < -bound {
-                        new_y = -bound;
+                    if new_y < floor {
+                        new_y = floor;
                         new_vel_y = 0; // Stop falling at bottom
                     } else if new_y > bound {
                         new_y = bound;
@@ -172,19 +120,23 @@ impl PhysicsSystem {
                     }
 
                     pos_write[i] = Position { x: new_x, y: new_y };
-                    vel_write[i] = Velocity { x: new_vel_x, y: new_vel_y };
+                    let clamped_x = new_vel_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    let clamped_y = new_vel_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+                    vel_write[i] = Velocity {
+                        x: clamped_x,
+                        y: clamped_y,
+                    };
+
+                    if debug_this_entity {
+                        println!(
+                            "[dbg] final entity={} pos=({}, {}), vel=({}, {})",
+                            entity_id, new_x, new_y, clamped_x, clamped_y
+                        );
+                    }
                 }
             }
         });
-
-        let num_queries = total_queries.get();
-        if num_queries > 0 {
-            let avg_neighbors = total_neighbors_found.get() as f64 / num_queries as f64;
-            println!(
-                "Query stats: {} queries, avg {:.1} neighbors/query, max {} neighbors",
-                num_queries, avg_neighbors, max_neighbors.get()
-            );
-        }
     }
 }
 
@@ -196,6 +148,7 @@ impl PhysicsSystem {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 2],
+    uv: [f32; 2],
 }
 
 #[repr(C)]
@@ -204,6 +157,7 @@ struct InstanceData {
     position: [i32; 2],
     velocity: [i16; 2], // Add velocity for shader compatibility
     color: [u8; 4],
+    radius: f32,
 }
 
 #[repr(C)]
@@ -278,7 +232,7 @@ impl ParticleRenderer {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/triangle.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sand_circle.wgsl").into()),
         });
 
         // Create uniform buffer
@@ -334,15 +288,16 @@ impl ParticleRenderer {
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
                     },
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<InstanceData>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
-                            1 => Sint32x2,   // position
-                            2 => Snorm16x2,  // velocity
-                            3 => Unorm8x4    // color
+                            2 => Sint32x2,   // position
+                            3 => Snorm16x2,  // velocity
+                            4 => Unorm8x4,   // color
+                            5 => Float32     // radius
                         ],
                     },
                 ],
@@ -377,16 +332,36 @@ impl ParticleRenderer {
             cache: None,
         });
 
-        let size = 0.02;
-        let circle_vertices = [
-            Vertex { position: [0.0, size] },
-            Vertex { position: [-size, -size] },
-            Vertex { position: [size, -size] },
+        let quad_vertices = [
+            Vertex {
+                position: [-1.0, -1.0],
+                uv: [-1.0, -1.0],
+            },
+            Vertex {
+                position: [1.0, -1.0],
+                uv: [1.0, -1.0],
+            },
+            Vertex {
+                position: [1.0, 1.0],
+                uv: [1.0, 1.0],
+            },
+            Vertex {
+                position: [-1.0, -1.0],
+                uv: [-1.0, -1.0],
+            },
+            Vertex {
+                position: [1.0, 1.0],
+                uv: [1.0, 1.0],
+            },
+            Vertex {
+                position: [-1.0, 1.0],
+                uv: [-1.0, 1.0],
+            },
         ];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&circle_vertices),
+            contents: bytemuck::cast_slice(&quad_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
@@ -442,12 +417,21 @@ impl ParticleRenderer {
                     let colors = colors_col
                         .slice_read_typed::<Color>(start..end)
                         .expect("color slice");
+                    let velocities = storage
+                        .column(Velocity::ID)
+                        .ok()
+                        .and_then(|col| col.slice_read_typed::<Velocity>(start..end).ok());
 
                     for i in 0..positions.len() {
+                        let velocity = velocities
+                            .as_ref()
+                            .map(|slice| slice[i])
+                            .unwrap_or(Velocity { x: 0, y: 0 });
                         instance_data.push(InstanceData {
                             position: [positions[i].x, positions[i].y],
-                            velocity: [0, 0], // No interpolation needed for this demo
+                            velocity: [velocity.x, velocity.y],
                             color: [colors[i].r, colors[i].g, colors[i].b, 255],
+                            radius: PARTICLE_RADIUS as f32,
                         });
                     }
                 }
@@ -468,8 +452,11 @@ impl ParticleRenderer {
         }
 
         if !instance_data.is_empty() {
-            self.queue
-                .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
+            self.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&instance_data),
+            );
         }
 
         // Update uniforms (no interpolation for this demo)
@@ -517,7 +504,7 @@ impl ParticleRenderer {
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.draw(0..3, 0..(instance_count as u32));
+            render_pass.draw(0..6, 0..(instance_count as u32));
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -536,6 +523,7 @@ struct App {
     renderer: Option<ParticleRenderer>,
     world: World,
     queries: QueryRegistry,
+    relation_buffer: RelationBuffer,
     physics: PhysicsSystem,
     time: SimulationTime,
     frame_timer: FrameTimer,
@@ -549,14 +537,14 @@ impl App {
 
         // Spawn sand particles in a pile at the top
         // Reduce count to demonstrate query system performance with reasonable density
-        let num_particles = 1_000;
+        let num_particles = 10_000;
         for i in 0..num_particles {
             // Distribute particles in a rectangular region at the top
             let cols = 50; // Spread them out more
             let row = i / cols;
             let col = i % cols;
 
-            let spacing = 100_000; // 1.0 meter spacing - more spread out
+            let spacing = PARTICLE_DIAMETER * 2; // keep roughly one particle gap
             let start_x = -(cols as i32 * spacing) / 2;
             let start_y = UNITS_PER_NDC - (row as i32 * spacing);
 
@@ -580,19 +568,24 @@ impl App {
 
         let physics = PhysicsSystem::new(&mut world);
 
-        // Create spatial hash grid for position queries
         let mut queries = QueryRegistry::new();
-        // Cell size should match query radius for optimal performance
-        // With 1m spacing and 0.3m query radius, 0.6m cells work well
-        let spatial_config = SpatialHashConfig::new(Position::ID, 60_000); // 0.6 meter cells
+        let spatial_config = SpatialHashConfig::new(
+            Position::ID,
+            PARTICLE_DIAMETER, // cells roughly match particle width
+            PARTICLE_RADIUS,
+            COLLISION_RELATION,
+        );
         let spatial_hash = Box::new(SpatialHashGrid::new(spatial_config));
-        queries.register(Position::ID, spatial_hash);
+        queries.register(spatial_hash);
+
+        let relation_buffer = RelationBuffer::new(2048, 256);
 
         Self {
             window: None,
             renderer: None,
             world,
             queries,
+            relation_buffer,
             physics,
             time: SimulationTime::new(),
             frame_timer: FrameTimer::new(60),
@@ -604,17 +597,16 @@ impl App {
     fn tick(&mut self) {
         self.frame_timer.begin();
 
-        // Rebuild spatial hash before physics
         self.profiler.time_system("rebuild_queries", || {
-            if let Some(spatial_hash) = self.queries.get_mut(Position::ID) {
-                spatial_hash.rebuild(&self.world);
-            }
+            self.relation_buffer.clear();
+            self.queries
+                .rebuild_all(&self.world, &mut self.relation_buffer);
         });
 
         // Run physics
         self.profiler.time_system("physics", || {
             self.physics
-                .run(&mut self.world, &self.queries, TICK_DURATION_SECS);
+                .run(&mut self.world, &self.relation_buffer, TICK_DURATION_SECS);
         });
 
         // Swap buffers
@@ -684,13 +676,46 @@ impl ApplicationHandler for App {
 
                     println!("Entities: {}", self.world.entity_count());
 
-                    let rebuild_ms = self.profiler.get_timing("rebuild_queries").as_secs_f64() * 1000.0;
+                    let rebuild_ms =
+                        self.profiler.get_timing("rebuild_queries").as_secs_f64() * 1000.0;
                     let physics_ms = self.profiler.get_timing("physics").as_secs_f64() * 1000.0;
                     let render_ms = self.profiler.get_timing("render").as_secs_f64() * 1000.0;
                     println!(
                         "Systems: rebuild_queries={:.2}ms, physics={:.2}ms, render={:.2}ms",
                         rebuild_ms, physics_ms, render_ms
                     );
+
+                    let hash_metrics = spatial_hash_metrics_snapshot();
+                    if hash_metrics.total_calls > 0 {
+                        let avg_total_ms = (hash_metrics.total_ns as f64)
+                            / (hash_metrics.total_calls as f64)
+                            / 1_000_000.0;
+                        let avg_emit_ns = if hash_metrics.emit_calls > 0 {
+                            (hash_metrics.emit_ns as f64) / (hash_metrics.emit_calls as f64)
+                        } else {
+                            0.0
+                        };
+                        let avg_entities = hash_metrics.entities / hash_metrics.total_calls;
+                        let avg_relations = hash_metrics.relations / hash_metrics.total_calls;
+                        let avg_lookups = hash_metrics.bucket_lookups / hash_metrics.total_calls;
+                        let hit_rate = if hash_metrics.bucket_lookups > 0 {
+                            (hash_metrics.bucket_hits as f64) / (hash_metrics.bucket_lookups as f64)
+                                * 100.0
+                        } else {
+                            0.0
+                        };
+                        println!(
+                            "SpatialHash: avg_total={:.2}ms, emit_avg={:.2}ns, entities/tick={}, relations/tick={}, lookups/tick={}, hit_rate={:.1}%",
+                            avg_total_ms,
+                            avg_emit_ns,
+                            avg_entities,
+                            avg_relations,
+                            avg_lookups,
+                            hit_rate
+                        );
+                    }
+
+                    reset_spatial_hash_metrics();
 
                     self.profiler.reset();
                 }

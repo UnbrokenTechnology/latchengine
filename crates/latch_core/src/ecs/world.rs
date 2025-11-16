@@ -1,8 +1,8 @@
 use crate::ecs::{
     storage::{plan_archetype, ArchetypeStorage, PageBudget, PlanError, StorageError},
     ArchetypeId, ArchetypeLayout, Component, ComponentId, Entity, EntityBuilder,
-    EntityBuilderError, EntityId, EntityLoc, Generation, SystemDescriptor,
-    SystemHandle, SystemRegistrationError, SystemRegistry,
+    EntityBuilderError, EntityId, EntityLoc, Generation, SystemDescriptor, SystemHandle,
+    SystemRegistrationError, SystemRegistry,
 };
 use std::{collections::HashMap, convert::TryFrom};
 use thiserror::Error;
@@ -317,6 +317,12 @@ impl World {
 
     pub fn entity_count(&self) -> usize {
         self.live_count
+    }
+
+    pub fn resolve_entity(&self, entity_id: EntityId) -> Option<Entity> {
+        let slot = self.slots.get(entity_id as usize)?;
+        slot.location.as_ref()?;
+        Some(Entity::new(entity_id, slot.generation))
     }
 
     fn ensure_archetype_exists(&mut self, layout: &ArchetypeLayout) -> Result<(), WorldError> {

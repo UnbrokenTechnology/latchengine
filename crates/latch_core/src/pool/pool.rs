@@ -41,6 +41,15 @@ impl<T> PagedPool<T> {
         }
     }
 
+    pub fn clear(&mut self) {
+        for page in &mut self.pages {
+            page.clear();
+        }
+        if self.pages.len() > 1 {
+            self.pages.truncate(1);
+        }
+    }
+
     #[inline]
     pub fn rows_per_page(&self) -> usize {
         self.rows_per_page

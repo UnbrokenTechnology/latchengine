@@ -1,59 +1,57 @@
-//! Query accelerator system for efficient spatial and relational queries.
-//!
-//! This module provides an extensible framework for indexing entity data
-//! to answer queries like "find all entities near position X" without
-//! iterating through all entities.
+//! Relation accelerators build per-tick indices so systems can consume
+//! collision/visibility/trigger data without performing their own scans.
 
 mod accelerator;
+mod relation;
 mod spatial_hash;
 
-pub use accelerator::{QueryAccelerator, QueryResult};
-pub use spatial_hash::{query_params_radius, SpatialHashConfig, SpatialHashGrid};
+pub use accelerator::RelationAccelerator;
+pub use relation::{
+    EntityRelationEntry, RelationBuffer, RelationDelta, RelationIter, RelationPayloadRange,
+    RelationRecord, RelationType,
+};
+pub use spatial_hash::{
+    reset_spatial_hash_metrics, spatial_hash_metrics_snapshot, SpatialHashConfig, SpatialHashGrid,
+    SpatialHashMetricsSnapshot,
+};
 
-use crate::ecs::ComponentId;
+use crate::ecs::World;
 use std::collections::HashMap;
 
-/// Registry of query accelerators per component.
+/// Owns all registered relation accelerators and coordinates rebuild/emit passes.
 pub struct QueryRegistry {
-    /// Maps component IDs to their registered accelerators.
-    accelerators: HashMap<ComponentId, Box<dyn QueryAccelerator + Send + Sync>>,
+    accelerators: Vec<Box<dyn RelationAccelerator + Send + Sync>>,
+    by_type: HashMap<u16, usize>,
 }
 
 impl QueryRegistry {
-    /// Create a new empty query registry.
     pub fn new() -> Self {
         Self {
-            accelerators: HashMap::new(),
+            accelerators: Vec::new(),
+            by_type: HashMap::new(),
         }
     }
 
-    /// Register a query accelerator for a component.
-    pub fn register(
-        &mut self,
-        component_id: ComponentId,
-        accelerator: Box<dyn QueryAccelerator + Send + Sync>,
-    ) {
-        self.accelerators.insert(component_id, accelerator);
+    pub fn register(&mut self, accelerator: Box<dyn RelationAccelerator + Send + Sync>) {
+        let ty = accelerator.relation_type().raw();
+        if self.by_type.contains_key(&ty) {
+            panic!("relation accelerator for type {} already registered", ty);
+        }
+        self.accelerators.push(accelerator);
+        self.by_type.insert(ty, self.accelerators.len() - 1);
     }
 
-    /// Get a reference to a registered accelerator.
-    pub fn get(&self, component_id: ComponentId) -> Option<&dyn QueryAccelerator> {
-        self.accelerators.get(&component_id).map(|b| &**b as &dyn QueryAccelerator)
+    pub fn rebuild_all(&mut self, world: &World, buffer: &mut RelationBuffer) {
+        for accelerator in &mut self.accelerators {
+            accelerator.rebuild(world, buffer);
+        }
     }
 
-    /// Get a mutable reference to a registered accelerator.
-    pub fn get_mut(&mut self, component_id: ComponentId) -> Option<&mut dyn QueryAccelerator> {
-        self.accelerators.get_mut(&component_id).map(|b| &mut **b as &mut dyn QueryAccelerator)
-    }
-
-    /// Check if an accelerator is registered for a component.
-    pub fn has_accelerator(&self, component_id: ComponentId) -> bool {
-        self.accelerators.contains_key(&component_id)
-    }
-
-    /// Get the list of component IDs that have accelerators.
-    pub fn component_ids(&self) -> Vec<ComponentId> {
-        self.accelerators.keys().copied().collect()
+    pub fn get(&self, relation: RelationType) -> Option<&dyn RelationAccelerator> {
+        self.by_type
+            .get(&relation.raw())
+            .and_then(|&idx| self.accelerators.get(idx))
+            .map(|boxed| &**boxed as &dyn RelationAccelerator)
     }
 }
 

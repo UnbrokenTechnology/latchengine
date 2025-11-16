@@ -19,6 +19,16 @@ impl<T> Page<T> {
     }
 
     #[inline]
+    pub fn clear(&mut self) {
+        unsafe {
+            for i in 0..self.len {
+                self.buf[i].assume_init_drop();
+            }
+        }
+        self.len = 0;
+    }
+
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }

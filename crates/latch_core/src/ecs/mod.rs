@@ -13,11 +13,11 @@ mod builder;
 mod component;
 mod entity;
 pub mod query;
+pub mod storage;
 mod system_descriptor;
 mod system_handle;
 mod system_registration_error;
 mod system_registry;
-pub mod storage;
 mod world;
 
 pub use archetype::{ArchetypeId, ArchetypeLayout};
@@ -29,17 +29,17 @@ pub use component::{
 };
 pub use entity::{Entity, EntityId, EntityLoc, Generation};
 pub use query::{
-    query_params_radius, QueryAccelerator, QueryRegistry, QueryResult, SpatialHashConfig,
-    SpatialHashGrid,
+    QueryRegistry, RelationAccelerator, RelationBuffer, RelationIter, RelationPayloadRange,
+    RelationRecord, RelationType, SpatialHashConfig, SpatialHashGrid,
+};
+pub use storage::{
+    plan_archetype, ArchetypePlan, ArchetypeStorage, ColumnError, PageBudget, PlanError,
+    StorageError,
 };
 pub use system_descriptor::SystemDescriptor;
 pub use system_handle::SystemHandle;
 pub use system_registration_error::SystemRegistrationError;
 pub(crate) use system_registry::SystemRegistry;
-pub use storage::{
-    plan_archetype, ArchetypePlan, ArchetypeStorage, ColumnError, PageBudget, PlanError,
-    StorageError,
-};
 pub use world::{World, WorldError};
 
 /// Spawn an entity into the world using builder-style component construction.

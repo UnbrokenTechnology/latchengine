@@ -386,6 +386,12 @@ impl ComponentColumn {
         Ok(())
     }
 
+    pub fn write_both_at(&mut self, gidx: usize, bytes: &[u8]) -> Result<(), ColumnError> {
+        self.write_cur_at(gidx, bytes)?;
+        self.write_next_at(gidx, bytes)?;
+        Ok(())
+    }
+
     pub fn copy_cur_to_next(&mut self, gidx: usize) -> Result<(), ColumnError> {
         let (page_idx, local_idx) = self.global_to_local(gidx)?;
         let cur = self.cur_pages[page_idx].row_bytes(local_idx);
@@ -777,6 +783,50 @@ impl ArchetypeStorage {
         } else {
             let (left, right) = self.columns.split_at_mut(idx_a);
             Ok((&mut right[0], &mut left[idx_b]))
+        }
+    }
+
+    pub fn columns_mut_pair_with_read(
+        &mut self,
+        write_a: ComponentId,
+        write_b: ComponentId,
+        read: ComponentId,
+    ) -> Result<(&mut ComponentColumn, &mut ComponentColumn, &ComponentColumn), StorageError> {
+        if write_a == write_b {
+            return Err(StorageError::DuplicateColumnRequest {
+                component_id: write_a,
+            });
+        }
+        if write_a == read || write_b == read {
+            return Err(StorageError::DuplicateColumnRequest { component_id: read });
+        }
+
+        let idx_a =
+            self.index_by_component
+                .get(&write_a)
+                .copied()
+                .ok_or(StorageError::ColumnMissing {
+                    component_id: write_a,
+                })?;
+        let idx_b =
+            self.index_by_component
+                .get(&write_b)
+                .copied()
+                .ok_or(StorageError::ColumnMissing {
+                    component_id: write_b,
+                })?;
+        let idx_r = self
+            .index_by_component
+            .get(&read)
+            .copied()
+            .ok_or(StorageError::ColumnMissing { component_id: read })?;
+
+        unsafe {
+            let ptr = self.columns.as_mut_ptr();
+            let col_a = &mut *ptr.add(idx_a);
+            let col_b = &mut *ptr.add(idx_b);
+            let col_r = &*ptr.add(idx_r);
+            Ok((col_a, col_b, col_r))
         }
     }
 

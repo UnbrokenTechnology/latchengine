@@ -10,9 +10,7 @@ pub enum SystemRegistrationError {
     #[error("system '{name}' does not access any components")]
     EmptyAccess { name: String },
 
-    #[error(
-        "component {component} already has a writer registered by system '{existing}'"
-    )]
+    #[error("component {component} already has a writer registered by system '{existing}'")]
     ComponentWriteConflict {
         component: ComponentId,
         existing: String,

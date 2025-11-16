@@ -191,7 +191,7 @@ impl PhysicsSystem {
                     } else {
                         dst_vel.x = src_vel.x;
                     }
-                    
+
                     if dst_pos.y < -bound {
                         dst_pos.y += ((-bound) - dst_pos.y) * 2;
                         dst_vel.y = src_vel.y.saturating_neg();
@@ -790,7 +790,7 @@ enum Mode {
 
 impl App {
     fn new() -> Self {
-    let mut world = World::new();
+        let mut world = World::new();
 
         // Spawn triangles with random positions and velocities
         use std::f32::consts::PI;
@@ -868,8 +868,7 @@ impl App {
 
         // Run physics (writes to "next" buffer)
         self.profiler.time_system("physics", || {
-            self.physics
-                .run(&mut self.world, TICK_DURATION_SECS);
+            self.physics.run(&mut self.world, TICK_DURATION_SECS);
         });
 
         // Swap buffers: make "next" become "current" for the next tick
