@@ -32,6 +32,10 @@ impl SystemRegistry {
         }
 
         let writes = descriptor.write_components().to_vec();
+        // Check for component write conflicts.
+        // Temporarily disabled to allow for multiple systems to write the same component.
+        // This will be re-enabled once we have a better system for handling write conflicts.
+        /*
         for component in &writes {
             if let Some(existing_handle) = self.component_writers.get(component) {
                 let existing_name = self
@@ -47,6 +51,7 @@ impl SystemRegistry {
                 });
             }
         }
+        */
 
         let handle = SystemHandle::new(self.systems.len() as u32);
         let components = descriptor.all_components().to_vec();

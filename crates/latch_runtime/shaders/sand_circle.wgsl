@@ -26,7 +26,7 @@ struct VertexOutput {
     @location(1) uv : vec2<f32>,
 }
 
-const UNITS_PER_NDC : f32 = 1000000.0; // 10 meters per NDC
+const UNITS_PER_NDC : f32 = 200000.0; // 10 meters per NDC
 const VELOCITY_SCALE : f32 = 32767.0 / UNITS_PER_NDC;
 
 @vertex

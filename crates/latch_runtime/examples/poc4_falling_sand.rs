@@ -19,7 +19,7 @@ use latch_core::ecs::{
     SpatialHashGrid, SystemDescriptor, SystemHandle, World,
 };
 use latch_core::spawn;
-use latch_core::time::{SimulationTime, TICK_DURATION_SECS};
+use latch_core::time::SimulationTime;
 use latch_metrics::{FrameTimer, SystemProfiler};
 
 use winit::{
@@ -38,15 +38,17 @@ use wgpu::util::DeviceExt;
 // ============================================================================
 
 const UNITS_PER_METER: i32 = 100_000;
-const UNITS_PER_NDC: i32 = 10 * UNITS_PER_METER;
-const PARTICLE_RADIUS: i32 = 500; // 5 mm radius particles
+const UNITS_PER_NDC: i32 = 2 * UNITS_PER_METER;
+const PARTICLE_RADIUS: i32 = 1000; // 5 mm radius particles
 const PARTICLE_DIAMETER: i32 = PARTICLE_RADIUS * 2;
-const FLOOR_Y: i32 = -UNITS_PER_NDC / 4; // keep pile within view
+const FLOOR_Y: i32 = -UNITS_PER_NDC / 2; // keep pile within view
 const DEBUG_ENTITY_ID: Option<EntityId> = None;
 const DEBUG_NEIGHBOR_LIMIT: usize = 8;
 const COLLISION_RELATION: RelationType = RelationType::new(1);
 const AXIS_JITTER_EPSILON: f32 = 0.000_1;
 const AXIS_JITTER_PUSH: f32 = 1.0;
+const COLLISION_LINEAR_DAMPING: f32 = 0.96;
+const COLLISION_TANGENT_FRICTION: f32 = 0.2;
 
 #[derive(Clone, Copy, Debug)]
 struct Position {
@@ -74,22 +76,22 @@ define_component!(Color, 3, "Color");
 // Systems
 // ============================================================================
 
-struct PhysicsSystem {
+struct MovementSystem {
     #[allow(dead_code)]
     handle: SystemHandle,
     component_filter: Vec<ComponentId>,
 }
 
-impl PhysicsSystem {
+impl MovementSystem {
     fn new(world: &mut World) -> Self {
-        let descriptor = SystemDescriptor::new("physics")
+        let descriptor = SystemDescriptor::new("movement")
             .reads([Position::ID, Velocity::ID])
             .writes([Position::ID, Velocity::ID]);
 
         let component_filter = descriptor.all_components().to_vec();
         let handle = world
             .register_system(descriptor)
-            .expect("failed to register physics system");
+            .expect("failed to register movement system");
 
         Self {
             handle,
@@ -97,9 +99,117 @@ impl PhysicsSystem {
         }
     }
 
-    fn run(&mut self, world: &mut World, relations: &RelationBuffer, _dt: f32) {
+    fn run(&mut self, world: &mut World) {
         const GRAVITY: i16 = -50; // Downward acceleration
 
+        world.for_each(&self.component_filter, |storage| {
+            let page_count = {
+                let column = storage
+                    .column(Position::ID)
+                    .expect("position column missing");
+                column.page_count()
+            };
+            for page_idx in 0..page_count {
+                let range = {
+                    let column = storage
+                        .column(Position::ID)
+                        .expect("position column missing");
+                    column.page_range(page_idx)
+                };
+                if range.is_empty() {
+                    continue;
+                }
+
+                let (pos_col, vel_col) = storage
+                    .columns_mut_pair(Position::ID, Velocity::ID)
+                    .expect("archetype missing position/velocity columns");
+
+                let (pos_read, pos_write) = pos_col
+                    .slice_rw_typed::<Position>(range.clone())
+                    .expect("position tile slice");
+                let (vel_read, vel_write) = vel_col
+                    .slice_rw_typed::<Velocity>(range.clone())
+                    .expect("velocity tile slice");
+
+                for i in 0..pos_read.len() {
+                    let src_pos = pos_read[i];
+                    let src_vel = vel_read[i];
+
+                    let mut pos_x = src_pos.x as f32;
+                    let mut pos_y = src_pos.y as f32;
+                    let mut vel_x = src_vel.x as f32;
+                    let mut vel_y_f = src_vel.y as f32;
+
+                    vel_y_f = (vel_y_f + GRAVITY as f32).max(-10_000.0);
+                    vel_y_f = vel_y_f.clamp(
+                        -(PARTICLE_DIAMETER - 1) as f32,
+                        (PARTICLE_DIAMETER - 1) as f32,
+                    );
+
+                    pos_x += vel_x;
+                    pos_y += vel_y_f;
+
+                    let horizontal_bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
+                    let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
+
+                    if pos_x < -horizontal_bound {
+                        pos_x = -horizontal_bound;
+                        vel_x = 0.0;
+                    } else if pos_x > horizontal_bound {
+                        pos_x = horizontal_bound;
+                        vel_x = 0.0;
+                    }
+
+                    if pos_y < floor {
+                        let penetration = floor - pos_y;
+                        pos_y = floor;
+                        if penetration > 0.0 && vel_y_f < 0.0 {
+                            vel_y_f = 0.0;
+                        }
+                    }
+
+                    let new_x = pos_x.round() as i32;
+                    let new_y = pos_y.round() as i32;
+                    let new_vel_x = vel_x.round() as i32;
+                    let new_vel_y = vel_y_f.round() as i32;
+
+                    pos_write[i] = Position { x: new_x, y: new_y };
+                    vel_write[i] = Velocity {
+                        x: new_vel_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                        y: new_vel_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    };
+                }
+            }
+        });
+    }
+}
+
+struct CollisionSystem {
+    #[allow(dead_code)]
+    handle: SystemHandle,
+    component_filter: Vec<ComponentId>,
+    iterations: usize,
+}
+
+impl CollisionSystem {
+    fn new(world: &mut World, iterations: usize) -> Self {
+        let descriptor = SystemDescriptor::new("collision")
+            .reads([Position::ID, Velocity::ID])
+            .writes([Position::ID, Velocity::ID]);
+
+        let component_filter = descriptor.all_components().to_vec();
+        let handle = world
+            .register_system(descriptor)
+            .expect("failed to register collision system");
+
+        Self {
+            handle,
+            component_filter,
+            iterations: iterations.max(1),
+        }
+    }
+
+    fn run(&mut self, world: &mut World, relations: &RelationBuffer) {
         world.for_each(&self.component_filter, |storage| {
             let page_count = {
                 let column = storage
@@ -131,156 +241,129 @@ impl PhysicsSystem {
                     .columns_mut_pair(Position::ID, Velocity::ID)
                     .expect("archetype missing position/velocity columns");
 
-                let start = range.start;
-                let end = range.end;
-
-                let (pos_read, pos_write) = pos_col
-                    .slice_rw_typed::<Position>(start..end)
+                let pos_write = pos_col
+                    .slice_write_typed::<Position>(range.clone())
                     .expect("position tile slice");
-                let (vel_read, vel_write) = vel_col
-                    .slice_rw_typed::<Velocity>(start..end)
+                let vel_write = vel_col
+                    .slice_write_typed::<Velocity>(range.clone())
                     .expect("velocity tile slice");
 
-                for i in 0..pos_read.len() {
-                    let src_pos = pos_read[i];
-                    let src_vel = vel_read[i];
-                    let entity_id = entity_ids[i];
-                    let jitter_sign = if entity_id % 2 == 0 { -1.0 } else { 1.0 };
-                    let debug_this_entity = DEBUG_ENTITY_ID
-                        .map(|target| target == entity_id)
-                        .unwrap_or(false);
-                    let neighbors = relations.relations_for_entity_id(entity_id);
+                for _ in 0..self.iterations {
+                    for i in 0..pos_write.len() {
+                        let entity_id = entity_ids[i];
+                        let jitter_sign = if entity_id % 2 == 0 { -1.0 } else { 1.0 };
+                        let debug_this_entity = DEBUG_ENTITY_ID
+                            .map(|target| target == entity_id)
+                            .unwrap_or(false);
+                        let neighbors = relations.relations_for_entity_id(entity_id);
 
-                    let mut pos_x = src_pos.x as f32;
-                    let mut pos_y = src_pos.y as f32;
-                    let mut vel_x = src_vel.x as f32;
-                    let mut vel_y_f = src_vel.y as f32;
-                    let mut accum_pos_x = 0.0f32;
-                    let mut accum_pos_y = 0.0f32;
-                    let mut accum_vel_x = 0.0f32;
-                    let mut accum_vel_y = 0.0f32;
+                        let mut pos_x = pos_write[i].x as f32;
+                        let mut pos_y = pos_write[i].y as f32;
+                        let mut vel_x = vel_write[i].x as f32;
+                        let mut vel_y_f = vel_write[i].y as f32;
 
-                    if debug_this_entity {
-                        println!(
-                            "[dbg] entity={} pos=({}, {}), vel=({}, {}) neighbors={}",
-                            entity_id,
-                            src_pos.x,
-                            src_pos.y,
-                            src_vel.x,
-                            src_vel.y,
-                            neighbors.len()
-                        );
-                    }
-
-                    for (idx, relation) in neighbors.iter().enumerate() {
-                        let delta = match relation.delta {
-                            Some(delta) => delta,
-                            None => continue,
-                        };
-                        let neighbor_x = (src_pos.x + delta.dx) as f32;
-                        let neighbor_y = (src_pos.y + delta.dy) as f32;
-                        let current_pos_x = pos_x + accum_pos_x;
-                        let current_pos_y = pos_y + accum_pos_y;
-                        let dx = current_pos_x - neighbor_x;
-                        let dy = current_pos_y - neighbor_y;
-                        let dist_sq = dx.mul_add(dx, dy * dy);
-                        if dist_sq <= 1.0 {
-                            continue;
-                        }
-                        let dist = dist_sq.sqrt();
-                        let penetration = (PARTICLE_DIAMETER as f32) - dist;
-                        if penetration <= 0.0 {
-                            continue;
-                        }
-
-                        let normal_x = dx / dist;
-                        let normal_y = dy / dist;
-                        let correction = penetration * 0.5;
-                        accum_pos_x += normal_x * correction;
-                        accum_pos_y += normal_y * correction;
-
-                        if normal_x.abs() <= AXIS_JITTER_EPSILON {
-                            accum_pos_x += jitter_sign * AXIS_JITTER_PUSH;
-                        } else if normal_y.abs() <= AXIS_JITTER_EPSILON {
-                            accum_pos_y += jitter_sign * AXIS_JITTER_PUSH;
-                        }
-
-                        let current_vel_x = vel_x + accum_vel_x;
-                        let current_vel_y = vel_y_f + accum_vel_y;
-                        let rel_vel = current_vel_x * normal_x + current_vel_y * normal_y;
-                        if rel_vel < 0.0 {
-                            accum_vel_x -= normal_x * rel_vel;
-                            accum_vel_y -= normal_y * rel_vel;
-                        }
-
-                        if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
+                        if debug_this_entity {
                             println!(
-                                "  -> neighbor={} delta=({}, {}), pen={:.2}, normal=({:.2}, {:.2})",
-                                relation.other.index(),
-                                delta.dx,
-                                delta.dy,
-                                penetration,
-                                normal_x,
-                                normal_y
+                                "[dbg] collision iter entity={} pos=({}, {}), vel=({}, {}) neighbors={}",
+                                entity_id,
+                                pos_write[i].x,
+                                pos_write[i].y,
+                                vel_write[i].x,
+                                vel_write[i].y,
+                                neighbors.len()
                             );
                         }
-                    }
 
-                    pos_x += accum_pos_x;
-                    pos_y += accum_pos_y;
-                    vel_x += accum_vel_x;
-                    vel_y_f += accum_vel_y;
+                        for (idx, relation) in neighbors.iter().enumerate() {
+                            let delta = match relation.delta {
+                                Some(delta) => delta,
+                                None => continue,
+                            };
+                            let dist_sq = (delta.dx.saturating_mul(delta.dx))
+                                .saturating_add(delta.dy.saturating_mul(delta.dy));
+                            if dist_sq <= 1 {
+                                continue;
+                            }
+                            let dist = (dist_sq as f32).sqrt();
+                            let penetration = (PARTICLE_DIAMETER as f32) - dist;
+                            if penetration <= 1.0 {
+                                continue;
+                            }
 
-                    // Apply gravity with capped fall distance per tick
-                    vel_y_f = (vel_y_f + GRAVITY as f32).max(-10_000.0);
-                    vel_y_f = vel_y_f.clamp(
-                        -(PARTICLE_DIAMETER - 1) as f32,
-                        (PARTICLE_DIAMETER - 1) as f32,
-                    );
+                            let normal_x = (delta.dx as f32) / dist;
+                            let normal_y = (delta.dy as f32) / dist;
+                            let correction = penetration * 0.5;
+                            pos_x += normal_x * correction;
+                            pos_y += normal_y * correction;
 
-                    // Integrate velocity
-                    pos_x += vel_x;
-                    pos_y += vel_y_f;
+                            if normal_x.abs() <= AXIS_JITTER_EPSILON {
+                                pos_x += jitter_sign * AXIS_JITTER_PUSH;
+                            } else if normal_y.abs() <= AXIS_JITTER_EPSILON {
+                                pos_y += jitter_sign * AXIS_JITTER_PUSH;
+                            }
 
-                    // Boundary collision with impulse-like response
-                    let horizontal_bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
-                    let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
+                            let rel_vel = vel_x * normal_x + vel_y_f * normal_y;
+                            if rel_vel < 0.0 {
+                                vel_x -= normal_x * rel_vel;
+                                vel_y_f -= normal_y * rel_vel;
+                            }
 
-                    if pos_x < -horizontal_bound {
-                        pos_x = -horizontal_bound;
-                        vel_x = 0.0;
-                    } else if pos_x > horizontal_bound {
-                        pos_x = horizontal_bound;
-                        vel_x = 0.0;
-                    }
+                            let tangent_x = -normal_y;
+                            let tangent_y = normal_x;
+                            let rel_tangent = vel_x * tangent_x + vel_y_f * tangent_y;
+                            if rel_tangent.abs() > f32::EPSILON {
+                                let friction_impulse = rel_tangent * COLLISION_TANGENT_FRICTION;
+                                vel_x -= tangent_x * friction_impulse;
+                                vel_y_f -= tangent_y * friction_impulse;
+                            }
 
-                    if pos_y < floor {
-                        let penetration = floor - pos_y;
-                        pos_y = floor;
-                        if penetration > 0.0 && vel_y_f < 0.0 {
-                            vel_y_f = 0.0;
+                            if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
+                                println!(
+                                    "  -> neighbor={} delta=({}, {}), pen={:.2}, normal=({:.2}, {:.2})",
+                                    relation.other.index(),
+                                    delta.dx,
+                                    delta.dy,
+                                    penetration,
+                                    normal_x,
+                                    normal_y
+                                );
+                            }
                         }
-                    }
 
-                    let new_x = pos_x.round() as i32;
-                    let new_y = pos_y.round() as i32;
-                    let new_vel_x = vel_x.round() as i32;
-                    let new_vel_y = vel_y_f.round() as i32;
+                        let horizontal_bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
+                        let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
 
-                    pos_write[i] = Position { x: new_x, y: new_y };
-                    let clamped_x = new_vel_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                    let clamped_y = new_vel_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        if pos_x < -horizontal_bound {
+                            pos_x = -horizontal_bound;
+                            vel_x = 0.0;
+                        } else if pos_x > horizontal_bound {
+                            pos_x = horizontal_bound;
+                            vel_x = 0.0;
+                        }
 
-                    vel_write[i] = Velocity {
-                        x: clamped_x,
-                        y: clamped_y,
-                    };
+                        if pos_y < floor {
+                            let penetration = floor - pos_y;
+                            pos_y = floor;
+                            if penetration > 0.0 && vel_y_f < 0.0 {
+                                vel_y_f = 0.0;
+                            }
+                        }
 
-                    if debug_this_entity {
-                        println!(
-                            "[dbg] final entity={} pos=({}, {}), vel=({}, {})",
-                            entity_id, new_x, new_y, clamped_x, clamped_y
-                        );
+                        vel_x *= COLLISION_LINEAR_DAMPING;
+                        vel_y_f *= COLLISION_LINEAR_DAMPING;
+
+                        pos_write[i] = Position {
+                            x: pos_x.round() as i32,
+                            y: pos_y.round() as i32,
+                        };
+                        vel_write[i] = Velocity {
+                            x: vel_x
+                                .round()
+                                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                            y: vel_y_f
+                                .round()
+                                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                        };
                     }
                 }
             }
@@ -672,7 +755,8 @@ struct App {
     world: World,
     queries: QueryRegistry,
     relation_buffer: RelationBuffer,
-    physics: PhysicsSystem,
+    movement: MovementSystem,
+    collision: CollisionSystem,
     time: SimulationTime,
     frame_timer: FrameTimer,
     profiler: SystemProfiler,
@@ -685,7 +769,7 @@ impl App {
 
         // Spawn sand particles starting near the floor so rows build upward
         // Allow rows to extend above the camera so sand continues pouring in
-        let num_particles = 20_000;
+        let num_particles = 10_000;
         for i in 0..num_particles {
             // Distribute particles in a rectangular column rising from the floor
             let cols = 50; // Spread them out horizontally
@@ -714,13 +798,14 @@ impl App {
             spawn!(world, pos, vel, color);
         }
 
-        let physics = PhysicsSystem::new(&mut world);
+        let movement = MovementSystem::new(&mut world);
+        let collision = CollisionSystem::new(&mut world, 10);
 
         let mut queries = QueryRegistry::new();
         let spatial_config = SpatialHashConfig::new(
             Position::ID,
-            PARTICLE_DIAMETER, // cells roughly match particle width
-            PARTICLE_DIAMETER, // radius matches interaction distance
+            PARTICLE_RADIUS,   // tighter cells reduce bucket occupancy
+            PARTICLE_DIAMETER, // keep full contact radius
             COLLISION_RELATION,
         );
         let spatial_hash = Box::new(SpatialHashGrid::new(spatial_config));
@@ -734,7 +819,8 @@ impl App {
             world,
             queries,
             relation_buffer,
-            physics,
+            movement,
+            collision,
             time: SimulationTime::new(),
             frame_timer: FrameTimer::new(60),
             profiler: SystemProfiler::new(),
@@ -745,19 +831,27 @@ impl App {
     fn tick(&mut self) {
         self.frame_timer.begin();
 
+        self.profiler.time_system("movement", || {
+            self.movement.run(&mut self.world);
+        });
+
+        // Movement writes into the next buffer; swap to expose it for query rebuilds.
+        self.world.swap_buffers();
+
         self.profiler.time_system("rebuild_queries", || {
             self.relation_buffer.clear();
             self.queries
                 .rebuild_all(&self.world, &mut self.relation_buffer);
         });
 
-        // Run physics
-        self.profiler.time_system("physics", || {
-            self.physics
-                .run(&mut self.world, &self.relation_buffer, TICK_DURATION_SECS);
+        // Swap back so collision can iterate over the next buffer while reading deltas from the rebuild.
+        self.world.swap_buffers();
+
+        self.profiler.time_system("collision", || {
+            self.collision.run(&mut self.world, &self.relation_buffer);
         });
 
-        // Swap buffers
+        // Commit collision corrections
         self.world.swap_buffers();
     }
 }
@@ -826,11 +920,12 @@ impl ApplicationHandler for App {
 
                     let rebuild_ms =
                         self.profiler.get_timing("rebuild_queries").as_secs_f64() * 1000.0;
-                    let physics_ms = self.profiler.get_timing("physics").as_secs_f64() * 1000.0;
+                    let movement_ms = self.profiler.get_timing("movement").as_secs_f64() * 1000.0;
+                    let collision_ms = self.profiler.get_timing("collision").as_secs_f64() * 1000.0;
                     let render_ms = self.profiler.get_timing("render").as_secs_f64() * 1000.0;
                     println!(
-                        "Systems: rebuild_queries={:.2}ms, physics={:.2}ms, render={:.2}ms",
-                        rebuild_ms, physics_ms, render_ms
+                        "Systems: movement={:.2}ms, collision={:.2}ms, rebuild_queries={:.2}ms, render={:.2}ms",
+                        movement_ms, collision_ms, rebuild_ms, render_ms
                     );
 
                     let hash_metrics = spatial_hash_metrics_snapshot();
