@@ -6,10 +6,152 @@
 // - Push particles away from each other on collision
 // - Show efficient neighbor queries without iterating all entities
 //
-                    // Apply velocity
-                    let mut new_x = src_pos.x + src_vel.x as i32;
-                    let mut new_y = src_pos.y + new_vel_y;
-                    let mut new_vel_x = src_vel.x as i32;
+// Success Criteria:
+// - 10,000+ sand particles
+// - Smooth 60 FPS with collision detection
+// - Particles never overlap
+// - Query performance scales better than O(n²)
+
+use latch_core::define_component;
+use latch_core::ecs::query::{reset_spatial_hash_metrics, spatial_hash_metrics_snapshot};
+use latch_core::ecs::{
+    ComponentId, EntityId, QueryRegistry, RelationBuffer, RelationType, SpatialHashConfig,
+    SpatialHashGrid, SystemDescriptor, SystemHandle, World,
+};
+use latch_core::spawn;
+use latch_core::time::{SimulationTime, TICK_DURATION_SECS};
+use latch_metrics::{FrameTimer, SystemProfiler};
+
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    window::{Window, WindowId},
+};
+
+use std::sync::Arc;
+use wgpu;
+use wgpu::util::DeviceExt;
+
+// ============================================================================
+// Components
+// ============================================================================
+
+const UNITS_PER_METER: i32 = 100_000;
+const UNITS_PER_NDC: i32 = 10 * UNITS_PER_METER;
+const PARTICLE_RADIUS: i32 = 500; // 5 mm radius particles
+const PARTICLE_DIAMETER: i32 = PARTICLE_RADIUS * 2;
+const FLOOR_Y: i32 = -UNITS_PER_NDC / 4; // keep pile within view
+const DEBUG_ENTITY_ID: Option<EntityId> = Some(9999);
+const DEBUG_NEIGHBOR_LIMIT: usize = 8;
+const COLLISION_RELATION: RelationType = RelationType::new(1);
+
+#[derive(Clone, Copy, Debug)]
+struct Position {
+    x: i32,
+    y: i32,
+}
+define_component!(Position, 1, "Position");
+
+#[derive(Clone, Copy, Debug)]
+struct Velocity {
+    x: i16,
+    y: i16,
+}
+define_component!(Velocity, 2, "Velocity");
+
+#[derive(Clone, Copy, Debug)]
+struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+define_component!(Color, 3, "Color");
+
+// ============================================================================
+// Systems
+// ============================================================================
+
+struct PhysicsSystem {
+    #[allow(dead_code)]
+    handle: SystemHandle,
+    component_filter: Vec<ComponentId>,
+}
+
+impl PhysicsSystem {
+    fn new(world: &mut World) -> Self {
+        let descriptor = SystemDescriptor::new("physics")
+            .reads([Position::ID, Velocity::ID])
+            .writes([Position::ID, Velocity::ID]);
+
+        let component_filter = descriptor.all_components().to_vec();
+        let handle = world
+            .register_system(descriptor)
+            .expect("failed to register physics system");
+
+        Self {
+            handle,
+            component_filter,
+        }
+    }
+
+    fn run(&mut self, world: &mut World, relations: &RelationBuffer, _dt: f32) {
+        const GRAVITY: i16 = -50; // Downward acceleration
+
+        world.for_each(&self.component_filter, |storage| {
+            let page_count = {
+                let column = storage
+                    .column(Position::ID)
+                    .expect("position column missing");
+                column.page_count()
+            };
+            let mut entity_ids: Vec<EntityId> = Vec::new();
+
+            for page_idx in 0..page_count {
+                let range = {
+                    let column = storage
+                        .column(Position::ID)
+                        .expect("position column missing");
+                    column.page_range(page_idx)
+                };
+                if range.is_empty() {
+                    continue;
+                }
+
+                entity_ids.clear();
+                entity_ids.extend_from_slice(
+                    storage
+                        .entity_ids_slice(range.clone())
+                        .expect("entity id slice"),
+                );
+
+                let (pos_col, vel_col) = storage
+                    .columns_mut_pair(Position::ID, Velocity::ID)
+                    .expect("archetype missing position/velocity columns");
+
+                let start = range.start;
+                let end = range.end;
+
+                let (pos_read, pos_write) = pos_col
+                    .slice_rw_typed::<Position>(start..end)
+                    .expect("position tile slice");
+                let (vel_read, vel_write) = vel_col
+                    .slice_rw_typed::<Velocity>(start..end)
+                    .expect("velocity tile slice");
+
+                for i in 0..pos_read.len() {
+                    let src_pos = pos_read[i];
+                    let src_vel = vel_read[i];
+                    let entity_id = entity_ids[i];
+                    let debug_this_entity = DEBUG_ENTITY_ID
+                        .map(|target| target == entity_id)
+                        .unwrap_or(false);
+                    let neighbors = relations.relations_for_entity_id(entity_id);
+
+                    let mut pos_x = src_pos.x as f32;
+                    let mut pos_y = src_pos.y as f32;
+                    let mut vel_x = src_vel.x as f32;
+                    let mut vel_y_f = src_vel.y as f32;
 
                     if debug_this_entity {
                         println!(
@@ -23,101 +165,90 @@
                         );
                     }
 
-                    if !neighbors.is_empty() {
-                        let mut push_x = 0.0f32;
-                        let mut push_y = 0.0f32;
-                        for (idx, relation) in neighbors.iter().enumerate() {
-                            let delta = match relation.delta {
-                                Some(delta) => delta,
-                                None => continue,
-                            };
-                            let dx = delta.dx as f32;
-                            let dy = delta.dy as f32;
-                            if dx == 0.0 && dy == 0.0 {
-                                continue;
-                            }
-                            let dist_sq = dx.mul_add(dx, dy * dy);
-                            if dist_sq <= 1.0 {
-                                continue;
-                            }
-                            let dist = dist_sq.sqrt();
-                            let penetration = (PARTICLE_DIAMETER as f32) - dist;
-                            if penetration <= 0.0 {
-                                continue;
-                            }
-                            let clamped_penetration = penetration.min(PARTICLE_DIAMETER as f32);
-                            let dir_x = dx / dist;
-                            let dir_y = dy / dist;
-                            push_x += dir_x * clamped_penetration;
-                            push_y += dir_y * clamped_penetration;
-
-                            if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
-                                let neighbor_pos = Position {
-                                    x: src_pos.x + delta.dx,
-                                    y: src_pos.y + delta.dy,
-                                };
-                                println!(
-                                    "  -> neighbor={} pos=({}, {}) delta=({}, {}), pen={:.2}",
-                                    relation.other.index(),
-                                    neighbor_pos.x,
-                                    neighbor_pos.y,
-                                    delta.dx,
-                                    delta.dy,
-                                    penetration
-                                );
-                            }
+                    for (idx, relation) in neighbors.iter().enumerate() {
+                        let delta = match relation.delta {
+                            Some(delta) => delta,
+                            None => continue,
+                        };
+                        let neighbor_x = (src_pos.x + delta.dx) as f32;
+                        let neighbor_y = (src_pos.y + delta.dy) as f32;
+                        let dx = pos_x - neighbor_x;
+                        let dy = pos_y - neighbor_y;
+                        let dist_sq = dx.mul_add(dx, dy * dy);
+                        if dist_sq <= 1.0 {
+                            continue;
+                        }
+                        let dist = dist_sq.sqrt();
+                        let penetration = (PARTICLE_DIAMETER as f32) - dist;
+                        if penetration <= 0.0 {
+                            continue;
                         }
 
-                        if push_x != 0.0 || push_y != 0.0 {
-                            let max_push = PARTICLE_DIAMETER as f32;
-                            let adj_x = push_x.clamp(-max_push, max_push).round() as i32;
-                            let adj_y = push_y.clamp(-max_push, max_push).round() as i32;
-                            new_x += adj_x;
-                            new_y += adj_y;
+                        let normal_x = dx / dist;
+                        let normal_y = dy / dist;
+                        let correction = penetration * 0.5;
+                        pos_x += normal_x * correction;
+                        pos_y += normal_y * correction;
 
-                            let push_len = ((adj_x * adj_x + adj_y * adj_y) as f32).sqrt();
-                            if push_len > 0.0 {
-                                let normal_x = adj_x as f32 / push_len;
-                                let normal_y = adj_y as f32 / push_len;
-                                let vel_along_normal =
-                                    (new_vel_x as f32) * normal_x + (new_vel_y as f32) * normal_y;
-                                if vel_along_normal < 0.0 {
-                                    new_vel_x -= (normal_x * vel_along_normal).round() as i32;
-                                    new_vel_y -= (normal_y * vel_along_normal).round() as i32;
-                                }
-                            }
+                        let rel_vel = vel_x * normal_x + vel_y_f * normal_y;
+                        if rel_vel < 0.0 {
+                            vel_x -= normal_x * rel_vel;
+                            vel_y_f -= normal_y * rel_vel;
+                        }
 
-                            new_vel_x = ((new_vel_x as f32) * 0.9) as i32;
-                            new_vel_y = ((new_vel_y as f32) * 0.9) as i32;
-
-                            if debug_this_entity {
-                                println!(
-                                    "  -> push=({}, {}), new_pos=({}, {}), new_vel=({}, {})",
-                                    adj_x, adj_y, new_x, new_y, new_vel_x, new_vel_y
-                                );
-                            }
+                        if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
+                            println!(
+                                "  -> neighbor={} delta=({}, {}), pen={:.2}, normal=({:.2}, {:.2})",
+                                relation.other.index(),
+                                delta.dx,
+                                delta.dy,
+                                penetration,
+                                normal_x,
+                                normal_y
+                            );
                         }
                     }
 
-                    // Boundary collision
-                    let bound = UNITS_PER_NDC - PARTICLE_RADIUS;
-                    let floor = FLOOR_Y + PARTICLE_RADIUS;
+                    // Apply gravity with capped fall distance per tick
+                    vel_y_f = (vel_y_f + GRAVITY as f32).max(-10_000.0);
+                    vel_y_f = vel_y_f.clamp(
+                        -(PARTICLE_DIAMETER - 1) as f32,
+                        (PARTICLE_DIAMETER - 1) as f32,
+                    );
 
-                    if new_x < -bound {
-                        new_x = -bound;
-                        new_vel_x = 0;
-                    } else if new_x > bound {
-                        new_x = bound;
-                        new_vel_x = 0;
+                    // Integrate velocity
+                    pos_x += vel_x;
+                    pos_y += vel_y_f;
+
+                    // Boundary collision with impulse-like response
+                    let bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
+                    let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
+
+                    if pos_x < -bound {
+                        pos_x = -bound;
+                        vel_x = 0.0;
+                    } else if pos_x > bound {
+                        pos_x = bound;
+                        vel_x = 0.0;
                     }
 
-                    if new_y < floor {
-                        new_y = floor;
-                        new_vel_y = 0; // Stop falling at bottom
-                    } else if new_y > bound {
-                        new_y = bound;
-                        new_vel_y = 0;
+                    if pos_y < floor {
+                        let penetration = floor - pos_y;
+                        pos_y = floor;
+                        if penetration > 0.0 && vel_y_f < 0.0 {
+                            vel_y_f = 0.0;
+                        }
+                    } else if pos_y > bound {
+                        pos_y = bound;
+                        if vel_y_f > 0.0 {
+                            vel_y_f = 0.0;
+                        }
                     }
+
+                    let new_x = pos_x.round() as i32;
+                    let new_y = pos_y.round() as i32;
+                    let new_vel_x = vel_x.round() as i32;
+                    let new_vel_y = vel_y_f.round() as i32;
 
                     pos_write[i] = Position { x: new_x, y: new_y };
                     let clamped_x = new_vel_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
@@ -572,7 +703,7 @@ impl App {
         let spatial_config = SpatialHashConfig::new(
             Position::ID,
             PARTICLE_DIAMETER, // cells roughly match particle width
-            PARTICLE_RADIUS,
+            PARTICLE_DIAMETER, // radius matches interaction distance
             COLLISION_RELATION,
         );
         let spatial_hash = Box::new(SpatialHashGrid::new(spatial_config));
