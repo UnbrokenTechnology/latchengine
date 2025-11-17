@@ -230,14 +230,14 @@ impl PhysicsSystem {
                     pos_y += vel_y_f;
 
                     // Boundary collision with impulse-like response
-                    let bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
+                    let horizontal_bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
                     let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
 
-                    if pos_x < -bound {
-                        pos_x = -bound;
+                    if pos_x < -horizontal_bound {
+                        pos_x = -horizontal_bound;
                         vel_x = 0.0;
-                    } else if pos_x > bound {
-                        pos_x = bound;
+                    } else if pos_x > horizontal_bound {
+                        pos_x = horizontal_bound;
                         vel_x = 0.0;
                     }
 
@@ -245,11 +245,6 @@ impl PhysicsSystem {
                         let penetration = floor - pos_y;
                         pos_y = floor;
                         if penetration > 0.0 && vel_y_f < 0.0 {
-                            vel_y_f = 0.0;
-                        }
-                    } else if pos_y > bound {
-                        pos_y = bound;
-                        if vel_y_f > 0.0 {
                             vel_y_f = 0.0;
                         }
                     }
@@ -675,18 +670,18 @@ impl App {
     fn new() -> Self {
         let mut world = World::new();
 
-        // Spawn sand particles in a pile at the top
-        // Reduce count to demonstrate query system performance with reasonable density
-        let num_particles = 10_000;
+        // Spawn sand particles starting near the floor so rows build upward
+        // Allow rows to extend above the camera so sand continues pouring in
+        let num_particles = 20_000;
         for i in 0..num_particles {
-            // Distribute particles in a rectangular region at the top
-            let cols = 50; // Spread them out more
+            // Distribute particles in a rectangular column rising from the floor
+            let cols = 50; // Spread them out horizontally
             let row = i / cols;
             let col = i % cols;
 
             let spacing = PARTICLE_DIAMETER * 2; // keep roughly one particle gap
             let start_x = -(cols as i32 * spacing) / 2;
-            let start_y = UNITS_PER_NDC - (row as i32 * spacing);
+            let start_y = (FLOOR_Y + PARTICLE_RADIUS) + (row as i32 * spacing);
 
             let pos = Position {
                 x: start_x + col as i32 * spacing,
