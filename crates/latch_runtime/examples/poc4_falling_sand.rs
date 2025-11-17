@@ -42,9 +42,11 @@ const UNITS_PER_NDC: i32 = 10 * UNITS_PER_METER;
 const PARTICLE_RADIUS: i32 = 500; // 5 mm radius particles
 const PARTICLE_DIAMETER: i32 = PARTICLE_RADIUS * 2;
 const FLOOR_Y: i32 = -UNITS_PER_NDC / 4; // keep pile within view
-const DEBUG_ENTITY_ID: Option<EntityId> = Some(9999);
+const DEBUG_ENTITY_ID: Option<EntityId> = None;
 const DEBUG_NEIGHBOR_LIMIT: usize = 8;
 const COLLISION_RELATION: RelationType = RelationType::new(1);
+const AXIS_JITTER_EPSILON: f32 = 0.000_1;
+const AXIS_JITTER_PUSH: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Position {
@@ -143,6 +145,7 @@ impl PhysicsSystem {
                     let src_pos = pos_read[i];
                     let src_vel = vel_read[i];
                     let entity_id = entity_ids[i];
+                    let jitter_sign = if entity_id % 2 == 0 { -1.0 } else { 1.0 };
                     let debug_this_entity = DEBUG_ENTITY_ID
                         .map(|target| target == entity_id)
                         .unwrap_or(false);
@@ -189,6 +192,12 @@ impl PhysicsSystem {
                         let correction = penetration * 0.5;
                         pos_x += normal_x * correction;
                         pos_y += normal_y * correction;
+
+                        if normal_x.abs() <= AXIS_JITTER_EPSILON {
+                            pos_x += jitter_sign * AXIS_JITTER_PUSH;
+                        } else if normal_y.abs() <= AXIS_JITTER_EPSILON {
+                            pos_y += jitter_sign * AXIS_JITTER_PUSH;
+                        }
 
                         let rel_vel = vel_x * normal_x + vel_y_f * normal_y;
                         if rel_vel < 0.0 {
