@@ -7,8 +7,8 @@ mod spatial_hash;
 
 pub use accelerator::RelationAccelerator;
 pub use relation::{
-    EntityRelationEntry, RelationBuffer, RelationDelta, RelationIter, RelationPayloadRange,
-    RelationRecord, RelationType,
+    EntityRelationEntry, RelationBuffer, RelationDelta, RelationIter, RelationLocation,
+    RelationPayloadRange, RelationRecord, RelationType,
 };
 pub use spatial_hash::{
     reset_spatial_hash_metrics, spatial_hash_metrics_snapshot, SpatialHashConfig, SpatialHashGrid,

@@ -1,6 +1,9 @@
 //! Spatial hash accelerator that emits broad-phase relation pairs in a single pass.
 
-use super::{RelationAccelerator, RelationBuffer, RelationDelta, RelationRecord, RelationType};
+use super::{
+    RelationAccelerator, RelationBuffer, RelationDelta, RelationLocation, RelationRecord,
+    RelationType,
+};
 use crate::ecs::{ComponentId, Entity, World};
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,6 +65,7 @@ struct GridEntry {
     coord: CellCoord,
     x: i32,
     y: i32,
+    location: RelationLocation,
 }
 
 pub struct SpatialHashGrid {
@@ -254,6 +258,8 @@ impl SpatialHashGrid {
                     RelationRecord::new(other.entity, entry.entity, relation, None),
                     &[],
                     Some(delta),
+                    Some(other.location),
+                    Some(entry.location),
                 );
                 emitted += 1;
             }
@@ -361,6 +367,7 @@ impl RelationAccelerator for SpatialHashGrid {
                         coord,
                         x,
                         y,
+                        location: RelationLocation::new(arch, range.start + row),
                     };
                     self.process_entry(entry, radius_sq, buffer);
                 }

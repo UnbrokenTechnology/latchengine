@@ -211,160 +211,167 @@ impl CollisionSystem {
 
     fn run(&mut self, world: &mut World, relations: &RelationBuffer) {
         world.for_each(&self.component_filter, |storage| {
-            let page_count = {
-                let column = storage
-                    .column(Position::ID)
-                    .expect("position column missing");
-                column.page_count()
-            };
-            let mut entity_ids: Vec<EntityId> = Vec::new();
+            let archetype_id = storage.plan().layout.id();
+            let entity_count = storage.entity_count();
+            if entity_count == 0 {
+                return;
+            }
 
-            for page_idx in 0..page_count {
-                let range = {
-                    let column = storage
-                        .column(Position::ID)
-                        .expect("position column missing");
-                    column.page_range(page_idx)
-                };
-                if range.is_empty() {
-                    continue;
-                }
+            let entity_ids: Vec<EntityId> = storage
+                .entity_ids_slice(0..entity_count)
+                .expect("entity id slice")
+                .to_vec();
 
-                entity_ids.clear();
-                entity_ids.extend_from_slice(
-                    storage
-                        .entity_ids_slice(range.clone())
-                        .expect("entity id slice"),
-                );
+            let (pos_col, vel_col) = storage
+                .columns_mut_pair(Position::ID, Velocity::ID)
+                .expect("archetype missing position/velocity columns");
+            let pos_write = pos_col
+                .column_slice_write::<Position>()
+                .expect("position column slice");
+            let vel_write = vel_col
+                .column_slice_write::<Velocity>()
+                .expect("velocity column slice");
 
-                let (pos_col, vel_col) = storage
-                    .columns_mut_pair(Position::ID, Velocity::ID)
-                    .expect("archetype missing position/velocity columns");
+            for _ in 0..self.iterations {
+                for row_index in 0..entity_count {
+                    let entity_id = entity_ids[row_index];
+                    let jitter_sign = if entity_id % 2 == 0 { -1.0 } else { 1.0 };
+                    let debug_this_entity = DEBUG_ENTITY_ID
+                        .map(|target| target == entity_id)
+                        .unwrap_or(false);
+                    let neighbors = relations.relations_for_entity_id(entity_id);
 
-                let pos_write = pos_col
-                    .slice_write_typed::<Position>(range.clone())
-                    .expect("position tile slice");
-                let vel_write = vel_col
-                    .slice_write_typed::<Velocity>(range.clone())
-                    .expect("velocity tile slice");
+                    let base_pos_x = pos_write[row_index].x as f32;
+                    let base_pos_y = pos_write[row_index].y as f32;
+                    let mut pos_x = base_pos_x;
+                    let mut pos_y = base_pos_y;
+                    let mut vel_x = vel_write[row_index].x as f32;
+                    let mut vel_y_f = vel_write[row_index].y as f32;
 
-                for _ in 0..self.iterations {
-                    for i in 0..pos_write.len() {
-                        let entity_id = entity_ids[i];
-                        let jitter_sign = if entity_id % 2 == 0 { -1.0 } else { 1.0 };
-                        let debug_this_entity = DEBUG_ENTITY_ID
-                            .map(|target| target == entity_id)
-                            .unwrap_or(false);
-                        let neighbors = relations.relations_for_entity_id(entity_id);
+                    if debug_this_entity {
+                        println!(
+                            "[dbg] collision iter entity={} pos=({}, {}), vel=({}, {}) neighbors={}",
+                            entity_id,
+                            pos_write[row_index].x,
+                            pos_write[row_index].y,
+                            vel_write[row_index].x,
+                            vel_write[row_index].y,
+                            neighbors.len()
+                        );
+                    }
 
-                        let mut pos_x = pos_write[i].x as f32;
-                        let mut pos_y = pos_write[i].y as f32;
-                        let mut vel_x = vel_write[i].x as f32;
-                        let mut vel_y_f = vel_write[i].y as f32;
+                    for (idx, relation) in neighbors.iter().enumerate() {
+                        let (neighbor_x, neighbor_y) = if let Some(loc) = relation.other_location {
+                            if loc.archetype == archetype_id && loc.row < pos_write.len() {
+                                let neighbor = pos_write[loc.row];
+                                (neighbor.x as f32, neighbor.y as f32)
+                            } else if let Some(delta) = relation.delta {
+                                (
+                                    base_pos_x + delta.dx as f32,
+                                    base_pos_y + delta.dy as f32,
+                                )
+                            } else {
+                                continue;
+                            }
+                        } else if let Some(delta) = relation.delta {
+                            (
+                                base_pos_x + delta.dx as f32,
+                                base_pos_y + delta.dy as f32,
+                            )
+                        } else {
+                            continue;
+                        };
 
-                        if debug_this_entity {
+                        let dx = pos_x - neighbor_x;
+                        let dy = pos_y - neighbor_y;
+                        let dist_sq = dx.mul_add(dx, dy * dy);
+                        if dist_sq <= 1.0 {
+                            continue;
+                        }
+                        let dist = dist_sq.sqrt();
+                        let penetration = (PARTICLE_DIAMETER as f32) - dist;
+                        if penetration <= 0.0 {
+                            continue;
+                        }
+
+                        let normal_x = dx / dist;
+                        let normal_y = dy / dist;
+                        let correction = penetration * 0.5;
+                        pos_x += normal_x * correction;
+                        pos_y += normal_y * correction;
+
+                        if normal_x.abs() <= AXIS_JITTER_EPSILON {
+                            pos_x += jitter_sign * AXIS_JITTER_PUSH;
+                        } else if normal_y.abs() <= AXIS_JITTER_EPSILON {
+                            pos_y += jitter_sign * AXIS_JITTER_PUSH;
+                        }
+
+                        let rel_vel = vel_x * normal_x + vel_y_f * normal_y;
+                        if rel_vel < 0.0 {
+                            vel_x -= normal_x * rel_vel;
+                            vel_y_f -= normal_y * rel_vel;
+                        }
+
+                        let tangent_x = -normal_y;
+                        let tangent_y = normal_x;
+                        let rel_tangent = vel_x * tangent_x + vel_y_f * tangent_y;
+                        if rel_tangent.abs() > f32::EPSILON {
+                            let friction_impulse = rel_tangent * COLLISION_TANGENT_FRICTION;
+                            vel_x -= tangent_x * friction_impulse;
+                            vel_y_f -= tangent_y * friction_impulse;
+                        }
+
+                        if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
+                            let (dx_dbg, dy_dbg) = relation
+                                .delta
+                                .map(|d| (d.dx, d.dy))
+                                .unwrap_or((0, 0));
                             println!(
-                                "[dbg] collision iter entity={} pos=({}, {}), vel=({}, {}) neighbors={}",
-                                entity_id,
-                                pos_write[i].x,
-                                pos_write[i].y,
-                                vel_write[i].x,
-                                vel_write[i].y,
-                                neighbors.len()
+                                "  -> neighbor={} delta=({}, {}), pen={:.2}, normal=({:.2}, {:.2})",
+                                relation.other.index(),
+                                dx_dbg,
+                                dy_dbg,
+                                penetration,
+                                normal_x,
+                                normal_y
                             );
                         }
-
-                        for (idx, relation) in neighbors.iter().enumerate() {
-                            let delta = match relation.delta {
-                                Some(delta) => delta,
-                                None => continue,
-                            };
-                            let dist_sq = (delta.dx.saturating_mul(delta.dx))
-                                .saturating_add(delta.dy.saturating_mul(delta.dy));
-                            if dist_sq <= 1 {
-                                continue;
-                            }
-                            let dist = (dist_sq as f32).sqrt();
-                            let penetration = (PARTICLE_DIAMETER as f32) - dist;
-                            if penetration <= 1.0 {
-                                continue;
-                            }
-
-                            let normal_x = (delta.dx as f32) / dist;
-                            let normal_y = (delta.dy as f32) / dist;
-                            let correction = penetration * 0.5;
-                            pos_x += normal_x * correction;
-                            pos_y += normal_y * correction;
-
-                            if normal_x.abs() <= AXIS_JITTER_EPSILON {
-                                pos_x += jitter_sign * AXIS_JITTER_PUSH;
-                            } else if normal_y.abs() <= AXIS_JITTER_EPSILON {
-                                pos_y += jitter_sign * AXIS_JITTER_PUSH;
-                            }
-
-                            let rel_vel = vel_x * normal_x + vel_y_f * normal_y;
-                            if rel_vel < 0.0 {
-                                vel_x -= normal_x * rel_vel;
-                                vel_y_f -= normal_y * rel_vel;
-                            }
-
-                            let tangent_x = -normal_y;
-                            let tangent_y = normal_x;
-                            let rel_tangent = vel_x * tangent_x + vel_y_f * tangent_y;
-                            if rel_tangent.abs() > f32::EPSILON {
-                                let friction_impulse = rel_tangent * COLLISION_TANGENT_FRICTION;
-                                vel_x -= tangent_x * friction_impulse;
-                                vel_y_f -= tangent_y * friction_impulse;
-                            }
-
-                            if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
-                                println!(
-                                    "  -> neighbor={} delta=({}, {}), pen={:.2}, normal=({:.2}, {:.2})",
-                                    relation.other.index(),
-                                    delta.dx,
-                                    delta.dy,
-                                    penetration,
-                                    normal_x,
-                                    normal_y
-                                );
-                            }
-                        }
-
-                        let horizontal_bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
-                        let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
-
-                        if pos_x < -horizontal_bound {
-                            pos_x = -horizontal_bound;
-                            vel_x = 0.0;
-                        } else if pos_x > horizontal_bound {
-                            pos_x = horizontal_bound;
-                            vel_x = 0.0;
-                        }
-
-                        if pos_y < floor {
-                            let penetration = floor - pos_y;
-                            pos_y = floor;
-                            if penetration > 0.0 && vel_y_f < 0.0 {
-                                vel_y_f = 0.0;
-                            }
-                        }
-
-                        vel_x *= COLLISION_LINEAR_DAMPING;
-                        vel_y_f *= COLLISION_LINEAR_DAMPING;
-
-                        pos_write[i] = Position {
-                            x: pos_x.round() as i32,
-                            y: pos_y.round() as i32,
-                        };
-                        vel_write[i] = Velocity {
-                            x: vel_x
-                                .round()
-                                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                            y: vel_y_f
-                                .round()
-                                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                        };
                     }
+
+                    let horizontal_bound = (UNITS_PER_NDC - PARTICLE_RADIUS) as f32;
+                    let floor = (FLOOR_Y + PARTICLE_RADIUS) as f32;
+
+                    if pos_x < -horizontal_bound {
+                        pos_x = -horizontal_bound;
+                        vel_x = 0.0;
+                    } else if pos_x > horizontal_bound {
+                        pos_x = horizontal_bound;
+                        vel_x = 0.0;
+                    }
+
+                    if pos_y < floor {
+                        let penetration = floor - pos_y;
+                        pos_y = floor;
+                        if penetration > 0.0 && vel_y_f < 0.0 {
+                            vel_y_f = 0.0;
+                        }
+                    }
+
+                    vel_x *= COLLISION_LINEAR_DAMPING;
+                    vel_y_f *= COLLISION_LINEAR_DAMPING;
+
+                    pos_write[row_index] = Position {
+                        x: pos_x.round() as i32,
+                        y: pos_y.round() as i32,
+                    };
+                    vel_write[row_index] = Velocity {
+                        x: vel_x
+                            .round()
+                            .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                        y: vel_y_f
+                            .round()
+                            .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                    };
                 }
             }
         });

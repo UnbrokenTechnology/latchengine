@@ -1,4 +1,4 @@
-use crate::ecs::{Entity, EntityId};
+use crate::ecs::{ArchetypeId, Entity, EntityId};
 use crate::pool::PagedPool;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -82,6 +82,20 @@ pub struct EntityRelationEntry {
     pub relation_type: RelationType,
     pub payload: Option<RelationPayloadRange>,
     pub delta: Option<RelationDelta>,
+    pub other_location: Option<RelationLocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelationLocation {
+    pub archetype: ArchetypeId,
+    pub row: usize,
+}
+
+impl RelationLocation {
+    #[inline]
+    pub fn new(archetype: ArchetypeId, row: usize) -> Self {
+        Self { archetype, row }
+    }
 }
 
 #[derive(Debug)]
@@ -152,6 +166,8 @@ impl RelationBuffer {
         record: RelationRecord,
         payload_bytes: &[u8],
         delta: Option<RelationDelta>,
+        entity_a_location: Option<RelationLocation>,
+        entity_b_location: Option<RelationLocation>,
     ) {
         let payload = if payload_bytes.is_empty() {
             None
@@ -188,6 +204,7 @@ impl RelationBuffer {
             stored.relation_type,
             stored.payload,
             delta_a,
+            entity_b_location,
         );
         self.append_bucket_edge(
             stored.entity_b.index(),
@@ -195,6 +212,7 @@ impl RelationBuffer {
             stored.relation_type,
             stored.payload,
             delta_b,
+            entity_a_location,
         );
     }
 
@@ -244,6 +262,7 @@ impl RelationBuffer {
         relation_type: RelationType,
         payload: Option<RelationPayloadRange>,
         delta: Option<RelationDelta>,
+        other_location: Option<RelationLocation>,
     ) {
         let bucket = self.bucket_mut(entity_id);
         bucket.entries.push(EntityRelationEntry {
@@ -251,6 +270,7 @@ impl RelationBuffer {
             relation_type,
             payload,
             delta,
+            other_location,
         });
     }
 
