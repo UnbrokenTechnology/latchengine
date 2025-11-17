@@ -155,6 +155,10 @@ impl PhysicsSystem {
                     let mut pos_y = src_pos.y as f32;
                     let mut vel_x = src_vel.x as f32;
                     let mut vel_y_f = src_vel.y as f32;
+                    let mut accum_pos_x = 0.0f32;
+                    let mut accum_pos_y = 0.0f32;
+                    let mut accum_vel_x = 0.0f32;
+                    let mut accum_vel_y = 0.0f32;
 
                     if debug_this_entity {
                         println!(
@@ -175,8 +179,10 @@ impl PhysicsSystem {
                         };
                         let neighbor_x = (src_pos.x + delta.dx) as f32;
                         let neighbor_y = (src_pos.y + delta.dy) as f32;
-                        let dx = pos_x - neighbor_x;
-                        let dy = pos_y - neighbor_y;
+                        let current_pos_x = pos_x + accum_pos_x;
+                        let current_pos_y = pos_y + accum_pos_y;
+                        let dx = current_pos_x - neighbor_x;
+                        let dy = current_pos_y - neighbor_y;
                         let dist_sq = dx.mul_add(dx, dy * dy);
                         if dist_sq <= 1.0 {
                             continue;
@@ -190,19 +196,21 @@ impl PhysicsSystem {
                         let normal_x = dx / dist;
                         let normal_y = dy / dist;
                         let correction = penetration * 0.5;
-                        pos_x += normal_x * correction;
-                        pos_y += normal_y * correction;
+                        accum_pos_x += normal_x * correction;
+                        accum_pos_y += normal_y * correction;
 
                         if normal_x.abs() <= AXIS_JITTER_EPSILON {
-                            pos_x += jitter_sign * AXIS_JITTER_PUSH;
+                            accum_pos_x += jitter_sign * AXIS_JITTER_PUSH;
                         } else if normal_y.abs() <= AXIS_JITTER_EPSILON {
-                            pos_y += jitter_sign * AXIS_JITTER_PUSH;
+                            accum_pos_y += jitter_sign * AXIS_JITTER_PUSH;
                         }
 
-                        let rel_vel = vel_x * normal_x + vel_y_f * normal_y;
+                        let current_vel_x = vel_x + accum_vel_x;
+                        let current_vel_y = vel_y_f + accum_vel_y;
+                        let rel_vel = current_vel_x * normal_x + current_vel_y * normal_y;
                         if rel_vel < 0.0 {
-                            vel_x -= normal_x * rel_vel;
-                            vel_y_f -= normal_y * rel_vel;
+                            accum_vel_x -= normal_x * rel_vel;
+                            accum_vel_y -= normal_y * rel_vel;
                         }
 
                         if debug_this_entity && idx < DEBUG_NEIGHBOR_LIMIT {
@@ -217,6 +225,11 @@ impl PhysicsSystem {
                             );
                         }
                     }
+
+                    pos_x += accum_pos_x;
+                    pos_y += accum_pos_y;
+                    vel_x += accum_vel_x;
+                    vel_y_f += accum_vel_y;
 
                     // Apply gravity with capped fall distance per tick
                     vel_y_f = (vel_y_f + GRAVITY as f32).max(-10_000.0);
